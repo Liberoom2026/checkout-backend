@@ -1,0 +1,10 @@
+{
+  "name": "lovable-checkout",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "stripe": "^11.0.0",
+    "node-fetch": "^2.6.7",
+    "raw-body": "^2.4.1"
+  }
+}
