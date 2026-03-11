@@ -35,7 +35,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { booking_id } = req.body;
+  const booking_id = req.body.booking_ids?.[0];
 
     if (!booking_id) {
       return res.status(400).json({ error: "booking_id required" });
