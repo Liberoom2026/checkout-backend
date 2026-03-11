@@ -1,5 +1,4 @@
 import Stripe from "stripe";
-import fetch from "node-fetch";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2022-11-15",
@@ -20,20 +19,11 @@ export default async function handler(req, res) {
   }
 
   try {
-    const {
-      booking_ids,
-      amount,
-      guest_email,
-      guest_name,
-      space_title
-    } = req.body;
+    const body = req.body;
 
-    if (!booking_ids || !amount) {
-      return res.status(400).json({ error: "Missing required fields" });
-    }
-
-    const booking_id = booking_ids[0];
-    const price_cents = Math.round(Number(amount) * 100);
+    const amount = body.amount || 10; // fallback seguro
+    const guest_email = body.guest_email || undefined;
+    const space_title = body.space_title || "Reserva";
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
@@ -44,26 +34,21 @@ export default async function handler(req, res) {
           price_data: {
             currency: "brl",
             product_data: {
-              name: space_title || "Reserva",
+              name: space_title,
             },
-            unit_amount: price_cents,
+            unit_amount: Math.round(Number(amount) * 100),
           },
           quantity: 1,
         },
       ],
-      metadata: {
-        booking_id,
-        guest_name,
-        guest_email
-      },
-      success_url: `${process.env.FRONTEND_URL}/pagamento-sucesso`,
-      cancel_url: `${process.env.FRONTEND_URL}/pagamento-cancelado`,
+      success_url: "https://liberoom.com.br/pagamento-sucesso",
+      cancel_url: "https://liberoom.com.br/pagamento-cancelado",
     });
 
-    return res.json({ sessionUrl: session.url });
+    return res.status(200).json({ sessionUrl: session.url });
 
   } catch (err) {
-    console.error(err);
+    console.error("Stripe error:", err);
     return res.status(500).json({ error: err.message });
   }
 }
