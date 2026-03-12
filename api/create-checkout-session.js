@@ -21,11 +21,35 @@ export default async function handler(req, res) {
   try {
     const body = req.body;
 
-    const amount = body.amount || 10; // fallback seguro
+    const amount = body.amount || 10;
     const guest_email = body.guest_email || undefined;
     const guest_name = body.guest_name || "Cliente";
     const space_title = body.space_title || "Reserva";
 
+    // 1️⃣ Criar booking primeiro
+    const bookingResponse = await fetch(`${process.env.SUPABASE_URL}/rest/v1/bookings`, {
+      method: "POST",
+      headers: {
+        apikey: process.env.SUPABASE_SERVICE_ROLE,
+        Authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE}`,
+        "Content-Type": "application/json",
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify({
+        property_id: null,
+        guest_name,
+        guest_email,
+        total_amount: amount,
+        price_cents: Math.round(Number(amount) * 100),
+        currency: "brl",
+        status: "pending",
+      }),
+    });
+
+    const bookingData = await bookingResponse.json();
+    const booking = bookingData[0];
+
+    // 2️⃣ Criar Stripe com metadata
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       payment_method_types: ["card"],
@@ -43,29 +67,25 @@ export default async function handler(req, res) {
         },
       ],
       metadata: {
-  booking_id: booking.id
-},
+        booking_id: booking.id.toString()
+      },
       success_url: "https://liberoom.com.br/pagamento-sucesso",
       cancel_url: "https://liberoom.com.br/pagamento-cancelado",
     });
-await fetch(`${process.env.SUPABASE_URL}/rest/v1/bookings`, {
-  method: "POST",
-  headers: {
-    apikey: process.env.SUPABASE_SERVICE_ROLE,
-    Authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE}`,
-    "Content-Type": "application/json",
-  },
-  body: JSON.stringify({
-    property_id: null,
-    guest_name: guest_name,
-    guest_email: guest_email,
-    total_amount: amount,
-    price_cents: Math.round(Number(amount) * 100),
-    currency: "brl",
-    stripe_session_id: session.id,
-    status: "pending",
-  }),
-});
+
+    // 3️⃣ Salvar stripe_session_id no booking
+    await fetch(`${process.env.SUPABASE_URL}/rest/v1/bookings?id=eq.${booking.id}`, {
+      method: "PATCH",
+      headers: {
+        apikey: process.env.SUPABASE_SERVICE_ROLE,
+        Authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        stripe_session_id: session.id,
+      }),
+    });
+
     return res.status(200).json({ url: session.url });
 
   } catch (err) {
