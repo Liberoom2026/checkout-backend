@@ -42,6 +42,9 @@ export default async function handler(req, res) {
           quantity: 1,
         },
       ],
+      metadata: {
+  booking_id: booking.id
+},
       success_url: "https://liberoom.com.br/pagamento-sucesso",
       cancel_url: "https://liberoom.com.br/pagamento-cancelado",
     });
