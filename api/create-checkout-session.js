@@ -63,7 +63,7 @@ await fetch(`${process.env.SUPABASE_URL}/rest/v1/bookings`, {
     status: "pending",
   }),
 });
-    return res.status(200).json({ sessionUrl: session.url });
+    return res.status(200).json({ url: session.url });
 
   } catch (err) {
     console.error("Stripe error:", err);
