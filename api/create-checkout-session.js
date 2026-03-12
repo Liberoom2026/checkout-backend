@@ -23,6 +23,7 @@ export default async function handler(req, res) {
 
     const amount = body.amount || 10; // fallback seguro
     const guest_email = body.guest_email || undefined;
+    const guest_name = body.guest_name || "Cliente";
     const space_title = body.space_title || "Reserva";
 
     const session = await stripe.checkout.sessions.create({
