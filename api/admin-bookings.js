@@ -1,5 +1,8 @@
 export default async function handler(req, res) {
 
+  res.setHeader("Access-Control-Allow-Origin", "http://localhost:3000");
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+
   const cookies = req.headers.cookie || "";
 
   if (!cookies.includes("admin_auth=true")) {
@@ -14,5 +17,6 @@ export default async function handler(req, res) {
   });
 
   const data = await response.json();
+
   res.status(200).json(data);
 }
