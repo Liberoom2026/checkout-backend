@@ -1,6 +1,7 @@
 export default async function handler(req, res) {
 
-  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Origin", "http://localhost:3000");
+  res.setHeader("Access-Control-Allow-Credentials", "true");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
@@ -18,10 +19,9 @@ export default async function handler(req, res) {
     return res.status(401).json({ error: "Senha incorreta" });
   }
 
-  // 🔥 Cookie simplificado para funcionar no localhost
   res.setHeader(
     "Set-Cookie",
-    "admin_auth=true; Path=/"
+    "admin_auth=true; Path=/; SameSite=Lax"
   );
 
   return res.status(200).json({ success: true });
