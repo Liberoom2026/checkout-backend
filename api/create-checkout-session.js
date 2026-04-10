@@ -1,309 +1,209 @@
-import { useState } from "react";
-import { ImageGalleryTrigger } from "@/components/ImageGallery";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Space } from "@/types/space";
-import { MapPin, Loader2, Check } from "lucide-react";
-import { toast } from "sonner";
+import Stripe from "stripe";
 
-interface ReservationModalProps {
-  space: Space | null;
-  isOpen: boolean;
-  onClose: () => void;
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
+  apiVersion: "2022-11-15",
+});
+
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
+
+function toNumber(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
 }
 
-type ReservationType = "time" | "period" | "day" | "full_property";
-type PeriodType = "morning" | "afternoon" | "evening";
-type BillingMode = "one_time" | "recurring";
+function toPositiveInt(value) {
+  const n = Math.floor(Number(value));
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
 
-const API_URL = "https://checkout-backend-beta.vercel.app/api/create-checkout-session";
+function getPeriodPrice(property, period) {
+  if (period === "morning") return toNumber(property.price_morning);
+  if (period === "afternoon") return toNumber(property.price_afternoon);
+  if (period === "evening") return toNumber(property.price_evening);
+  return 0;
+}
 
-export const ReservationModal = ({ space, isOpen, onClose }: ReservationModalProps) => {
-  const [formData, setFormData] = useState({
-    name: "",
-    email: "",
-    phone: "",
-  });
+function calcAmountCents(property, body) {
+  const type = body.reservation_type || "time";
 
-  const [reservationType, setReservationType] = useState<ReservationType>("time");
-  const [billingMode, setBillingMode] = useState<BillingMode>("one_time");
-  const [period, setPeriod] = useState<PeriodType>("morning");
-  const [reservationDate, setReservationDate] = useState("");
-  const [durationHours, setDurationHours] = useState("1");
-  const [daysCount, setDaysCount] = useState("1");
-  const [monthsCount, setMonthsCount] = useState("3");
+  const pricePerHour = toNumber(property.price_per_hour);
+  const pricePerDay = toNumber(property.price_per_day);
+  const pricePerMonth = toNumber(property.price_per_month);
 
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  let amount = 0;
 
-  const handleSubmit = async () => {
-    if (!space) return;
+  switch (type) {
+    case "time":
+      amount = pricePerHour * toNumber(body.duration_hours, 1);
+      break;
 
-    if (!formData.name || !formData.email) {
-      toast.error("Preencha seus dados");
-      return;
+    case "period": {
+      const fixed = getPeriodPrice(property, body.period);
+      if (fixed > 0) {
+        amount = fixed;
+      } else {
+        amount = pricePerHour * toNumber(body.duration_hours, 4);
+      }
+      break;
     }
 
-    const payload: Record<string, any> = {
-      property_id: space.id,
-      guest_name: formData.name,
-      guest_email: formData.email,
-      phone: formData.phone || "",
-      billing_mode: billingMode,
-      reservation_type: reservationType,
-      date: reservationDate || null,
-    };
+    case "day":
+      amount = pricePerDay * toNumber(body.days_count, 1);
+      break;
 
-    if (reservationType === "time") {
-      const hours = Number(durationHours);
-      if (!hours || hours <= 0) {
-        toast.error("Informe a quantidade de horas");
-        return;
-      }
-      payload.duration_hours = hours;
+    case "full_property":
+      amount = pricePerMonth * toNumber(body.months_count, 3);
+      break;
+
+    default:
+      throw new Error("Tipo de reserva inválido");
+  }
+
+  const cents = Math.round(amount * 100);
+
+  if (!cents || cents <= 0) {
+    throw new Error("Valor inválido");
+  }
+
+  return cents;
+}
+
+// 🔥 BUSCA NO SPACES (CORRIGIDO)
+async function fetchProperty(propertyId) {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/spaces?id=eq.${propertyId}&select=*`,
+    {
+      headers: {
+        apikey: SUPABASE_SERVICE_ROLE,
+        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`,
+      },
     }
+  );
 
-    if (reservationType === "period") {
-      payload.period = period;
-      payload.duration_hours = Number(durationHours) > 0 ? Number(durationHours) : 4;
-    }
+  const raw = await res.text();
 
-    if (reservationType === "day") {
-      const days = Number(daysCount);
-      if (!days || days <= 0) {
-        toast.error("Informe a quantidade de dias");
-        return;
-      }
-      payload.days_count = days;
-    }
+  if (!res.ok) {
+    throw new Error(`Erro ao buscar imóvel: ${raw}`);
+  }
 
-    if (reservationType === "full_property") {
-      const months = Number(monthsCount);
-      if (!months || months < 3) {
-        toast.error("Imóvel completo exige no mínimo 3 meses");
-        return;
-      }
-      payload.months_count = months;
-    }
+  const data = raw ? JSON.parse(raw) : [];
 
-    setIsSubmitting(true);
+  if (!data[0]) {
+    throw new Error("Imóvel não encontrado");
+  }
 
-    try {
-      const response = await fetch(API_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+  return data[0];
+}
 
-      const raw = await response.text();
-      let data: any = {};
-      try {
-        data = raw ? JSON.parse(raw) : {};
-      } catch {
-        data = { error: raw };
-      }
-
-      if (!response.ok) {
-        toast.error(data.error || `Erro no checkout (${response.status})`);
-        return;
-      }
-
-      if (!data.url) {
-        toast.error("A API não devolveu a URL de pagamento");
-        return;
-      }
-
-      window.location.href = data.url;
-    } catch (err) {
-      console.error(err);
-      toast.error("Erro ao processar pagamento");
-    } finally {
-      setIsSubmitting(false);
-    }
+// 🔥 CRIA BOOKING
+async function createBooking(body, amount) {
+  const payload = {
+    property_id: body.property_id,
+    guest_name: body.guest_name,
+    guest_email: body.guest_email,
+    phone: body.phone || null,
+    date: body.date || null,
+    reservation_type: body.reservation_type,
+    period: body.period || null,
+    duration_hours: body.duration_hours || null,
+    days_count: body.days_count || null,
+    months_count: body.months_count || null,
+    billing_mode: body.billing_mode || "one_time",
+    total_amount: amount,
+    price_cents: Math.round(amount * 100),
+    currency: "brl",
+    status: "pending",
   };
 
-  if (!space) return null;
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/bookings`, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_SERVICE_ROLE,
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`,
+      "Content-Type": "application/json",
+      Prefer: "return=representation",
+    },
+    body: JSON.stringify(payload),
+  });
 
-  return (
-    <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-[500px] max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle className="text-2xl font-bold">Reservar Espaço</DialogTitle>
-        </DialogHeader>
+  const data = await res.json();
 
-        <div className="flex gap-4 p-4 bg-muted rounded-xl mb-4">
-          <div className="relative w-20 h-20 shrink-0">
-            <img
-              src={space.imageUrl}
-              alt={space.title}
-              className="w-20 h-20 rounded-lg object-cover"
-            />
+  if (!res.ok) {
+    throw new Error(data.error || "Erro ao criar booking");
+  }
 
-            {space.images && space.images.length > 1 && (
-              <ImageGalleryTrigger
-                images={space.images}
-                title={space.title}
-                mainImage={space.imageUrl}
-              />
-            )}
-          </div>
+  return data[0];
+}
 
-          <div>
-            <h3 className="font-semibold text-foreground">{space.title}</h3>
+// 🔥 SALVA SESSION
+async function updateBooking(id, sessionId) {
+  await fetch(`${SUPABASE_URL}/rest/v1/bookings?id=eq.${id}`, {
+    method: "PATCH",
+    headers: {
+      apikey: SUPABASE_SERVICE_ROLE,
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      stripe_session_id: sessionId,
+    }),
+  });
+}
 
-            <div className="flex items-center gap-1 text-muted-foreground text-sm mt-1">
-              <MapPin className="w-3.5 h-3.5" />
-              <span>
-                {space.neighborhood}, {space.city}
-              </span>
-            </div>
-          </div>
-        </div>
+// 🔥 HANDLER
+export default async function handler(req, res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-        <div className="space-y-4">
-          <div>
-            <Label>Nome</Label>
-            <Input
-              value={formData.name}
-              onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-            />
-          </div>
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
-          <div>
-            <Label>Email</Label>
-            <Input
-              value={formData.email}
-              onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-            />
-          </div>
+  try {
+    const body = req.body;
 
-          <div>
-            <Label>Telefone</Label>
-            <Input
-              value={formData.phone}
-              onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
-            />
-          </div>
+    const property = await fetchProperty(body.property_id);
 
-          <div>
-            <Label>Data da reserva</Label>
-            <Input
-              type="date"
-              value={reservationDate}
-              onChange={(e) => setReservationDate(e.target.value)}
-            />
-          </div>
+    const amountCents = calcAmountCents(property, body);
+    const amount = amountCents / 100;
 
-          <div>
-            <Label>Tipo de reserva</Label>
-            <select
-              className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-              value={reservationType}
-              onChange={(e) => setReservationType(e.target.value as ReservationType)}
-            >
-              <option value="time">Horário</option>
-              <option value="period">Período</option>
-              <option value="day">Diária</option>
-              <option value="full_property">Imóvel completo</option>
-            </select>
-          </div>
+    const booking = await createBooking(body, amount);
 
-          <div>
-            <Label>Forma de cobrança</Label>
-            <select
-              className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-              value={billingMode}
-              onChange={(e) => setBillingMode(e.target.value as BillingMode)}
-            >
-              <option value="one_time">Única</option>
-              <option value="recurring">Recorrente</option>
-            </select>
-          </div>
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      payment_method_types: ["card"],
+      customer_email: body.guest_email,
+      line_items: [
+        {
+          price_data: {
+            currency: "brl",
+            product_data: {
+              name: property.title || "Reserva",
+            },
+            unit_amount: amountCents,
+          },
+          quantity: 1,
+        },
+      ],
+      metadata: {
+        booking_id: booking.id.toString(),
+      },
+      success_url: "https://liberoom.com.br/pagamento-sucesso",
+      cancel_url: "https://liberoom.com.br/pagamento-cancelado",
+    });
 
-          {reservationType === "time" && (
-            <div>
-              <Label>Duração em horas</Label>
-              <Input
-                type="number"
-                min="1"
-                value={durationHours}
-                onChange={(e) => setDurationHours(e.target.value)}
-              />
-            </div>
-          )}
+    await updateBooking(booking.id, session.id);
 
-          {reservationType === "period" && (
-            <>
-              <div>
-                <Label>Período</Label>
-                <select
-                  className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                  value={period}
-                  onChange={(e) => setPeriod(e.target.value as PeriodType)}
-                >
-                  <option value="morning">Manhã</option>
-                  <option value="afternoon">Tarde</option>
-                  <option value="evening">Noite</option>
-                </select>
-              </div>
+    return res.status(200).json({
+      url: session.url,
+      session_id: session.id,
+    });
 
-              <div>
-                <Label>Duração em horas</Label>
-                <Input
-                  type="number"
-                  min="1"
-                  value={durationHours}
-                  onChange={(e) => setDurationHours(e.target.value)}
-                />
-              </div>
-            </>
-          )}
-
-          {reservationType === "day" && (
-            <div>
-              <Label>Quantidade de dias</Label>
-              <Input
-                type="number"
-                min="1"
-                value={daysCount}
-                onChange={(e) => setDaysCount(e.target.value)}
-              />
-            </div>
-          )}
-
-          {reservationType === "full_property" && (
-            <div>
-              <Label>Quantidade de meses</Label>
-              <Input
-                type="number"
-                min="3"
-                value={monthsCount}
-                onChange={(e) => setMonthsCount(e.target.value)}
-              />
-            </div>
-          )}
-
-          <Button
-            variant="cta"
-            className="w-full"
-            onClick={handleSubmit}
-            disabled={isSubmitting}
-          >
-            {isSubmitting ? (
-              <>
-                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                Processando...
-              </>
-            ) : (
-              <>
-                <Check className="w-4 h-4 mr-2" />
-                Confirmar Reserva
-              </>
-            )}
-          </Button>
-        </div>
-      </DialogContent>
-    </Dialog>
-  );
-};
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({
+      error: err.message || "Erro interno",
+    });
+  }
+}
