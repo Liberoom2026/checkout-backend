@@ -7,14 +7,6 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
 
-function getCorsHeaders() {
-  return {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
-  };
-}
-
 function toNumber(value, fallback = 0) {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
@@ -169,11 +161,7 @@ async function fetchProperty(propertyId) {
   return data?.[0] || null;
 }
 
-async function createBooking({
-  amount,
-  body,
-  reservationType,
-}) {
+async function createBooking({ amount, body, reservationType }) {
   const guest_name = body.guest_name || "Cliente";
   const guest_email = body.guest_email || undefined;
 
@@ -181,12 +169,12 @@ async function createBooking({
     property_id: body.property_id || null,
     guest_name,
     guest_email,
-    phone: body.phone || "",
-    date: body.date || "",
-    start_at: body.start_at || "",
-    end_at: body.end_at || "",
+    phone: body.phone ? String(body.phone) : null,
+    date: body.date ? String(body.date) : null,
+    start_at: body.start_at ? String(body.start_at) : null,
+    end_at: body.end_at ? String(body.end_at) : null,
     reservation_type: reservationType || "time",
-    period: body.period || "",
+    period: body.period || null,
     duration_hours: body.duration_hours ? Number(body.duration_hours) : null,
     days_count: body.days_count ? Number(body.days_count) : null,
     months_count: body.months_count ? Number(body.months_count) : null,
@@ -197,19 +185,16 @@ async function createBooking({
     status: "pending",
   };
 
-  const bookingResponse = await fetch(
-    `${SUPABASE_URL}/rest/v1/bookings`,
-    {
-      method: "POST",
-      headers: {
-        apikey: SUPABASE_SERVICE_ROLE,
-        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`,
-        "Content-Type": "application/json",
-        Prefer: "return=representation",
-      },
-      body: JSON.stringify(bookingPayload),
-    }
-  );
+  const bookingResponse = await fetch(`${SUPABASE_URL}/rest/v1/bookings`, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_SERVICE_ROLE,
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`,
+      "Content-Type": "application/json",
+      Prefer: "return=representation",
+    },
+    body: JSON.stringify(bookingPayload),
+  });
 
   const bookingData = await bookingResponse.json();
 
@@ -222,6 +207,7 @@ async function createBooking({
   }
 
   const booking = Array.isArray(bookingData) ? bookingData[0] : bookingData;
+
   if (!booking?.id) {
     throw new Error("Booking criado sem ID");
   }
@@ -250,15 +236,6 @@ async function updateBookingStripeSession(bookingId, sessionId) {
   }
 }
 
-// OPTIONS
-export async function OPTIONS(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  return res.status(200).end();
-}
-
-// POST
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -287,8 +264,6 @@ export default async function handler(req, res) {
     let property = null;
     let amountCents = null;
 
-    // Mantém compatibilidade com o fluxo antigo:
-    // se vier amount e não houver necessidade de calcular, usa amount direto.
     const hasExplicitAmount =
       body.amount !== undefined && body.amount !== null && body.amount !== "";
 
@@ -306,7 +281,6 @@ export default async function handler(req, res) {
 
     const amountBRL = amountCents / 100;
 
-    // Cria booking antes do Stripe, como já era no fluxo atual
     const booking = await createBooking({
       amount: amountBRL,
       body,
