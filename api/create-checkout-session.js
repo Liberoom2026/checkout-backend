@@ -8,6 +8,33 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
 
+const ALLOWED_ORIGINS = [
+  "https://liberoom.com.br",
+  "https://www.liberoom.com.br",
+  "http://localhost:3000",
+  "http://localhost:5173",
+  "http://localhost:4173",
+];
+
+function isAllowedOrigin(origin) {
+  if (!origin) return false;
+  if (ALLOWED_ORIGINS.includes(origin)) return true;
+  if (origin.endsWith(".lovableproject.com")) return true;
+  return false;
+}
+
+function setCorsHeaders(res, origin) {
+  if (isAllowedOrigin(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, apikey, x-client-info"
+  );
+}
+
 function toNumber(value, fallback = 0) {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
@@ -54,7 +81,11 @@ function calcAmountCents(property, body) {
 
       if (pricePerHour > 0) {
         amountBRL = pricePerHour * hours;
-      } else if (body.amount !== undefined && body.amount !== null && body.amount !== "") {
+      } else if (
+        body.amount !== undefined &&
+        body.amount !== null &&
+        body.amount !== ""
+      ) {
         amountBRL = toNumber(body.amount);
       } else {
         throw new Error("Preço por hora não configurado");
@@ -69,7 +100,11 @@ function calcAmountCents(property, body) {
         amountBRL = fixedPeriodPrice * daysCount;
       } else if (pricePerHour > 0) {
         amountBRL = pricePerHour * hours * daysCount;
-      } else if (body.amount !== undefined && body.amount !== null && body.amount !== "") {
+      } else if (
+        body.amount !== undefined &&
+        body.amount !== null &&
+        body.amount !== ""
+      ) {
         amountBRL = toNumber(body.amount);
       } else {
         throw new Error("Preço do período não configurado");
@@ -84,7 +119,11 @@ function calcAmountCents(property, body) {
         amountBRL = pricePerDay * days;
       } else if (pricePerHour > 0) {
         amountBRL = pricePerHour * 8 * days;
-      } else if (body.amount !== undefined && body.amount !== null && body.amount !== "") {
+      } else if (
+        body.amount !== undefined &&
+        body.amount !== null &&
+        body.amount !== ""
+      ) {
         amountBRL = toNumber(body.amount);
       } else {
         throw new Error("Preço por diária não configurado");
@@ -94,7 +133,9 @@ function calcAmountCents(property, body) {
 
     case "full_property": {
       if (!monthsCount) {
-        throw new Error("months_count é obrigatório para reservation_type=full_property");
+        throw new Error(
+          "months_count é obrigatório para reservation_type=full_property"
+        );
       }
 
       if (monthsCount < minMonthsFullRental) {
@@ -109,7 +150,11 @@ function calcAmountCents(property, body) {
         amountBRL = pricePerDay * 30 * monthsCount;
       } else if (pricePerHour > 0) {
         amountBRL = pricePerHour * 8 * 30 * monthsCount;
-      } else if (body.amount !== undefined && body.amount !== null && body.amount !== "") {
+      } else if (
+        body.amount !== undefined &&
+        body.amount !== null &&
+        body.amount !== ""
+      ) {
         amountBRL = toNumber(body.amount);
       } else {
         throw new Error("Preço mensal não configurado");
@@ -135,7 +180,6 @@ function calcAmountCents(property, body) {
   return amountCents;
 }
 
-// Cobra mensalmente na assinatura, mas calcula a mensalidade com base na ocorrência semanal
 function calcRecurringMonthlyAmountCents(property, body) {
   const type = body.reservation_type || "time";
 
@@ -193,7 +237,11 @@ function calcRecurringMonthlyAmountCents(property, body) {
 
       if (pricePerHour > 0) {
         weeklyOccurrenceBRL = pricePerHour * hours;
-      } else if (body.amount !== undefined && body.amount !== null && body.amount !== "") {
+      } else if (
+        body.amount !== undefined &&
+        body.amount !== null &&
+        body.amount !== ""
+      ) {
         weeklyOccurrenceBRL = toNumber(body.amount);
       } else {
         throw new Error("Preço por hora não configurado");
@@ -202,7 +250,6 @@ function calcRecurringMonthlyAmountCents(property, body) {
     }
   }
 
-  // mensalidade = valor semanal * 4
   const monthlyAmountCents = Math.round(weeklyOccurrenceBRL * 100 * 4);
 
   if (!Number.isFinite(monthlyAmountCents) || monthlyAmountCents <= 0) {
@@ -762,9 +809,8 @@ async function updateBookingStripeSession(bookingId, sessionId) {
 }
 
 export default async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  const origin = req.headers.origin || "";
+  setCorsHeaders(res, origin);
 
   if (req.method === "OPTIONS") {
     return res.status(200).end();
@@ -840,7 +886,9 @@ export default async function handler(req, res) {
                 price_data: {
                   currency: "brl",
                   product_data: {
-                    name: property.title ? `Reserva mensal - ${property.title}` : "Reserva mensal",
+                    name: property.title
+                      ? `Reserva mensal - ${property.title}`
+                      : "Reserva mensal",
                   },
                   unit_amount: amountCents,
                   recurring: {
