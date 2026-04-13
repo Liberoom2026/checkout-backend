@@ -1,3 +1,34 @@
+export default async function handler(req, res) {
+  const origin = req.headers.origin || "";
+
+  if (
+    origin === "https://liberoom.com.br" ||
+    origin === "https://www.liberoom.com.br" ||
+    origin.endsWith(".lovableproject.com") ||
+    origin === "http://localhost:3000" ||
+    origin === "http://localhost:5173" ||
+    origin === "http://localhost:4173"
+  ) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, apikey, x-client-info"
+  );
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
+  if (req.method !== "POST") {
+    return res.status(405).send("Method Not Allowed");
+  }
+
+  // resto do código...
+}
 ```js
 import Stripe from "stripe";
 
