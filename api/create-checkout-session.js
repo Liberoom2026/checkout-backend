@@ -53,7 +53,11 @@ function calcAmountCents(property, body) {
 
       if (pricePerHour > 0) {
         amountBRL = pricePerHour * hours;
-      } else if (body.amount !== undefined && body.amount !== null && body.amount !== "") {
+      } else if (
+        body.amount !== undefined &&
+        body.amount !== null &&
+        body.amount !== ""
+      ) {
         amountBRL = toNumber(body.amount);
       } else {
         throw new Error("Preço por hora não configurado");
@@ -68,7 +72,11 @@ function calcAmountCents(property, body) {
         amountBRL = fixedPeriodPrice * daysCount;
       } else if (pricePerHour > 0) {
         amountBRL = pricePerHour * hours * daysCount;
-      } else if (body.amount !== undefined && body.amount !== null && body.amount !== "") {
+      } else if (
+        body.amount !== undefined &&
+        body.amount !== null &&
+        body.amount !== ""
+      ) {
         amountBRL = toNumber(body.amount);
       } else {
         throw new Error("Preço do período não configurado");
@@ -83,7 +91,11 @@ function calcAmountCents(property, body) {
         amountBRL = pricePerDay * days;
       } else if (pricePerHour > 0) {
         amountBRL = pricePerHour * 8 * days;
-      } else if (body.amount !== undefined && body.amount !== null && body.amount !== "") {
+      } else if (
+        body.amount !== undefined &&
+        body.amount !== null &&
+        body.amount !== ""
+      ) {
         amountBRL = toNumber(body.amount);
       } else {
         throw new Error("Preço por diária não configurado");
@@ -93,7 +105,9 @@ function calcAmountCents(property, body) {
 
     case "full_property": {
       if (!monthsCount) {
-        throw new Error("months_count é obrigatório para reservation_type=full_property");
+        throw new Error(
+          "months_count é obrigatório para reservation_type=full_property"
+        );
       }
 
       if (monthsCount < minMonthsFullRental) {
@@ -108,7 +122,11 @@ function calcAmountCents(property, body) {
         amountBRL = pricePerDay * 30 * monthsCount;
       } else if (pricePerHour > 0) {
         amountBRL = pricePerHour * 8 * 30 * monthsCount;
-      } else if (body.amount !== undefined && body.amount !== null && body.amount !== "") {
+      } else if (
+        body.amount !== undefined &&
+        body.amount !== null &&
+        body.amount !== ""
+      ) {
         amountBRL = toNumber(body.amount);
       } else {
         throw new Error("Preço mensal não configurado");
@@ -134,15 +152,15 @@ function calcAmountCents(property, body) {
   return amountCents;
 }
 
-function parseUtcDate(dateStr) {
-  if (!dateStr) return null;
-  const d = new Date(`${dateStr}T00:00:00.000Z`);
-  return Number.isNaN(d.getTime()) ? null : d;
-}
-
 function parseAnyDate(dateStr) {
   if (!dateStr) return null;
   const d = new Date(dateStr);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function parseUtcDate(dateStr) {
+  if (!dateStr) return null;
+  const d = new Date(`${dateStr}T00:00:00.000Z`);
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
@@ -157,7 +175,6 @@ function addMonths(date, months) {
   const day = d.getUTCDate();
   d.setUTCMonth(d.getUTCMonth() + months);
 
-  // Ajuste simples para meses com menos dias
   if (d.getUTCDate() < day) {
     d.setUTCDate(0);
   }
@@ -169,24 +186,104 @@ function intervalsOverlap(aStart, aEnd, bStart, bEnd) {
   return aStart < bEnd && aEnd > bStart;
 }
 
-function buildRequestedIntervals(body) {
-  const type = body.reservation_type || "time";
-  const items = Array.isArray(body.reservation_items) ? body.reservation_items : [];
+function normalizeWeekdays(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.map((v) => String(v).toLowerCase().trim());
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((v) => v.trim().toLowerCase())
+      .filter(Boolean);
+  }
+  return [];
+}
 
-  const intervals = [];
+function weekdayIndexFromString(value) {
+  const map = {
+    sunday: 0,
+    sun: 0,
+    0: 0,
+    monday: 1,
+    mon: 1,
+    1: 1,
+    tuesday: 2,
+    tue: 2,
+    2: 2,
+    wednesday: 3,
+    wed: 3,
+    3: 3,
+    thursday: 4,
+    thu: 4,
+    4: 4,
+    friday: 5,
+    fri: 5,
+    5: 5,
+    saturday: 6,
+    sat: 6,
+    6: 6,
+  };
+  const key = String(value).toLowerCase().trim();
+  return map[key];
+}
+
+function getFixedPeriodWindow(period) {
+  const windows = {
+    morning: { start: "08:00", end: "12:00" },
+    afternoon: { start: "13:00", end: "17:00" },
+    evening: { start: "18:00", end: "22:00" },
+  };
+  return windows[period] || windows.morning;
+}
+
+function getIntervalFromSimplePayload(body) {
+  const type = body.reservation_type || "time";
+
+  if (body.start_at && body.end_at) {
+    const start = parseAnyDate(body.start_at);
+    const end = parseAnyDate(body.end_at);
+    if (start && end && start < end) return { start, end };
+  }
+
+  if (!body.date) return null;
+
+  if (type === "day") {
+    const start = parseUtcDate(body.date);
+    if (!start) return null;
+    return { start, end: addDays(start, 1) };
+  }
 
   if (type === "full_property") {
-    const startDate = body.date || body.start_date || body.start_at;
-    const monthsCount = toPositiveInt(body.months_count) || 3;
-
-    const start = body.start_at ? parseAnyDate(body.start_at) : parseUtcDate(startDate);
-    if (start) {
-      const end = addMonths(start, monthsCount);
-      intervals.push({ start, end });
-    }
-
-    return intervals;
+    const start = body.start_at ? parseAnyDate(body.start_at) : parseUtcDate(body.date);
+    if (!start) return null;
+    const months = toPositiveInt(body.months_count) || 3;
+    return { start, end: addMonths(start, months) };
   }
+
+  if (type === "period") {
+    const window = getFixedPeriodWindow(body.period || "morning");
+    const start = parseAnyDate(`${body.date}T${window.start}:00`);
+    const end = parseAnyDate(`${body.date}T${window.end}:00`);
+    if (start && end) return { start, end };
+    return null;
+  }
+
+  if (type === "time") {
+    if (body.startTime && body.endTime) {
+      const start = parseAnyDate(`${body.date}T${body.startTime}:00`);
+      const end = parseAnyDate(`${body.date}T${body.endTime}:00`);
+      if (start && end) return { start, end };
+    }
+  }
+
+  return null;
+}
+
+function buildRequestedIntervals(body) {
+  const type = body.reservation_type || "time";
+  const billingMode = body.billing_mode || "one_time";
+  const items = Array.isArray(body.reservation_items) ? body.reservation_items : [];
+
+  const baseIntervals = [];
 
   if (items.length > 0) {
     for (const item of items) {
@@ -197,75 +294,110 @@ function buildRequestedIntervals(body) {
         start = parseAnyDate(item.start_at);
         end = parseAnyDate(item.end_at);
       } else if (item.date) {
-        const base = parseUtcDate(item.date);
-        if (base) {
-          if (type === "day") {
+        if (type === "day") {
+          const base = parseUtcDate(item.date);
+          if (base) {
             start = base;
             end = addDays(base, 1);
-          } else if (type === "period") {
-            const period = item.period || body.period || "morning";
-            const fixedWindows = {
-              morning: { start: "08:00", end: "12:00" },
-              afternoon: { start: "13:00", end: "17:00" },
-              evening: { start: "18:00", end: "22:00" },
-            };
-            const window = fixedWindows[period] || fixedWindows.morning;
-            start = parseAnyDate(`${item.date}T${window.start}:00`);
-            end = parseAnyDate(`${item.date}T${window.end}:00`);
-          } else if (type === "time") {
-            if (item.startTime && item.endTime) {
-              start = parseAnyDate(`${item.date}T${item.startTime}:00`);
-              end = parseAnyDate(`${item.date}T${item.endTime}:00`);
-            }
+          }
+        } else if (type === "period") {
+          const window = getFixedPeriodWindow(item.period || body.period || "morning");
+          start = parseAnyDate(`${item.date}T${window.start}:00`);
+          end = parseAnyDate(`${item.date}T${window.end}:00`);
+        } else if (type === "time") {
+          if (item.startTime && item.endTime) {
+            start = parseAnyDate(`${item.date}T${item.startTime}:00`);
+            end = parseAnyDate(`${item.date}T${item.endTime}:00`);
           }
         }
       }
 
       if (start && end && start < end) {
-        intervals.push({ start, end });
+        baseIntervals.push({ start, end });
       }
     }
   }
 
-  if (intervals.length > 0) return intervals;
-
-  // Fallback para payload antigo / simples
-  if (body.start_at && body.end_at) {
-    const start = parseAnyDate(body.start_at);
-    const end = parseAnyDate(body.end_at);
-    if (start && end && start < end) {
-      intervals.push({ start, end });
-      return intervals;
-    }
+  if (baseIntervals.length === 0) {
+    const single = getIntervalFromSimplePayload(body);
+    if (single) baseIntervals.push(single);
   }
 
-  if (body.date) {
-    const base = parseUtcDate(body.date);
-    if (base) {
-      if (type === "day") {
-        intervals.push({ start: base, end: addDays(base, 1) });
-      } else if (type === "period") {
-        const period = body.period || "morning";
-        const fixedWindows = {
-          morning: { start: "08:00", end: "12:00" },
-          afternoon: { start: "13:00", end: "17:00" },
-          evening: { start: "18:00", end: "22:00" },
-        };
-        const window = fixedWindows[period] || fixedWindows.morning;
-        const start = parseAnyDate(`${body.date}T${window.start}:00`);
-        const end = parseAnyDate(`${body.date}T${window.end}:00`);
-        if (start && end) intervals.push({ start, end });
-      } else if (type === "time") {
-        if (body.start_at && body.end_at) {
-          const start = parseAnyDate(body.start_at);
-          const end = parseAnyDate(body.end_at);
-          if (start && end) intervals.push({ start, end });
+  if (billingMode !== "recurring") {
+    return baseIntervals;
+  }
+
+  const recurrenceUnit =
+    String(
+      body.recurrence_unit ||
+        body.recurrence_frequency ||
+        body.repeat_unit ||
+        "weekly"
+    ).toLowerCase();
+
+  const recurrenceInterval = Math.max(
+    1,
+    toPositiveInt(body.recurrence_interval) || 1
+  );
+
+  const recurrenceCount =
+    toPositiveInt(body.recurrence_count) ||
+    toPositiveInt(body.count) ||
+    toPositiveInt(body.recurring_count);
+
+  const recurrenceUntil =
+    body.recurrence_until || body.until || body.end_date || null;
+
+  const weekdays = normalizeWeekdays(
+    body.weekdays || body.days_of_week || body.byday
+  );
+
+  const expanded = [];
+
+  for (const base of baseIntervals) {
+    expanded.push(base);
+
+    const durationMs = base.end.getTime() - base.start.getTime();
+    if (durationMs <= 0) continue;
+
+    let occurrencesCreated = 1;
+    let cursor = new Date(base.start.getTime());
+
+    while (true) {
+      if (recurrenceCount && occurrencesCreated >= recurrenceCount) break;
+
+      if (recurrenceUnit === "daily") {
+        cursor = addDays(cursor, recurrenceInterval);
+      } else if (recurrenceUnit === "monthly") {
+        cursor = addMonths(cursor, recurrenceInterval);
+      } else {
+        cursor = addDays(cursor, recurrenceInterval * 7);
+      }
+
+      if (recurrenceUntil) {
+        const untilDate = parseAnyDate(recurrenceUntil);
+        if (untilDate && cursor > untilDate) break;
+      }
+
+      if (weekdays.length > 0 && recurrenceUnit === "weekly") {
+        const wd = cursor.getUTCDay();
+        const allowed = weekdays.some((day) => weekdayIndexFromString(day) === wd);
+        if (!allowed) {
+          continue;
         }
       }
+
+      const nextStart = new Date(cursor.getTime());
+      const nextEnd = new Date(cursor.getTime() + durationMs);
+
+      expanded.push({ start: nextStart, end: nextEnd });
+      occurrencesCreated += 1;
+
+      if (occurrencesCreated > 500) break;
     }
   }
 
-  return intervals;
+  return expanded;
 }
 
 async function fetchProperty(propertyId) {
@@ -276,7 +408,7 @@ async function fetchProperty(propertyId) {
   const selectFields =
     "id,title,price_per_hour,price_per_day,price_per_month,price_morning,price_afternoon,price_evening,min_months_full_rental";
 
-  let res = await fetch(
+  const res = await fetch(
     `${SUPABASE_URL}/rest/v1/properties?id=eq.${propertyId}&select=${encodeURIComponent(selectFields)}`,
     {
       headers: {
@@ -286,7 +418,7 @@ async function fetchProperty(propertyId) {
     }
   );
 
-  let raw = await res.text();
+  const raw = await res.text();
 
   if (!res.ok) {
     throw new Error(`Erro ao buscar imóvel: ${raw}`);
@@ -302,11 +434,9 @@ async function fetchProperty(propertyId) {
   return property;
 }
 
-async function hasConflict(propertyId, requestedIntervals) {
-  if (requestedIntervals.length === 0) return false;
-
+async function fetchBookings(propertyId) {
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/bookings?property_id=eq.${propertyId}&status=neq.cancelled&select=id,start_at,end_at,date,reservation_type`,
+    `${SUPABASE_URL}/rest/v1/bookings?property_id=eq.${propertyId}&status=neq.cancelled&select=id,start_at,end_at,date,reservation_type,period,duration_hours,days_count,months_count,billing_mode`,
     {
       headers: {
         apikey: SUPABASE_SERVICE_ROLE,
@@ -321,34 +451,171 @@ async function hasConflict(propertyId, requestedIntervals) {
     throw new Error(`Erro ao consultar reservas: ${raw}`);
   }
 
-  const existingBookings = raw ? JSON.parse(raw) : [];
+  return raw ? JSON.parse(raw) : [];
+}
 
-  for (const booking of existingBookings) {
-    const existingStart = booking.start_at ? parseAnyDate(booking.start_at) : null;
-    const existingEnd = booking.end_at ? parseAnyDate(booking.end_at) : null;
+async function fetchRecurringContracts(propertyId) {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/recurring_contracts?property_id=eq.${propertyId}&status=neq.cancelled&select=*`,
+    {
+      headers: {
+        apikey: SUPABASE_SERVICE_ROLE,
+        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`,
+      },
+    }
+  );
 
-    if (!existingStart || !existingEnd) {
-      // Fallback para reservas antigas sem start/end
-      if (booking.date) {
-        const base = parseUtcDate(booking.date);
-        if (base) {
-          const dayStart = base;
-          const dayEnd = addDays(base, 1);
-          for (const req of requestedIntervals) {
-            if (intervalsOverlap(req.start, req.end, dayStart, dayEnd)) {
-              return true;
-            }
-          }
-        }
-      }
-      continue;
+  const raw = await res.text();
+
+  if (!res.ok) {
+    // Se a tabela não existir ou o schema for diferente, não quebra o checkout inteiro
+    return [];
+  }
+
+  return raw ? JSON.parse(raw) : [];
+}
+
+function buildIntervalsFromContract(contract) {
+  const intervals = [];
+
+  if (contract.start_at && contract.end_at) {
+    const start = parseAnyDate(contract.start_at);
+    const end = parseAnyDate(contract.end_at);
+    if (start && end && start < end) intervals.push({ start, end });
+  } else if (contract.date && contract.startTime && contract.endTime) {
+    const start = parseAnyDate(`${contract.date}T${contract.startTime}:00`);
+    const end = parseAnyDate(`${contract.date}T${contract.endTime}:00`);
+    if (start && end && start < end) intervals.push({ start, end });
+  } else if (contract.date) {
+    const period = contract.period || "morning";
+    const window = getFixedPeriodWindow(period);
+    const start = parseAnyDate(`${contract.date}T${window.start}:00`);
+    const end = parseAnyDate(`${contract.date}T${window.end}:00`);
+    if (start && end && start < end) intervals.push({ start, end });
+  }
+
+  const base = intervals[0];
+  if (!base) return intervals;
+
+  const recurrenceUnit =
+    String(
+      contract.recurrence_unit ||
+        contract.recurrence_frequency ||
+        contract.repeat_unit ||
+        "weekly"
+    ).toLowerCase();
+
+  const recurrenceInterval = Math.max(
+    1,
+    toPositiveInt(contract.recurrence_interval) || 1
+  );
+
+  const recurrenceCount =
+    toPositiveInt(contract.recurrence_count) ||
+    toPositiveInt(contract.count) ||
+    toPositiveInt(contract.recurring_count);
+
+  const recurrenceUntil =
+    contract.recurrence_until || contract.until || contract.end_date || null;
+
+  const weekdays = normalizeWeekdays(
+    contract.weekdays || contract.days_of_week || contract.byday
+  );
+
+  const durationMs = base.end.getTime() - base.start.getTime();
+  if (durationMs <= 0) return intervals;
+
+  let occurrencesCreated = 1;
+  let cursor = new Date(base.start.getTime());
+
+  while (true) {
+    if (recurrenceCount && occurrencesCreated >= recurrenceCount) break;
+
+    if (recurrenceUnit === "daily") {
+      cursor = addDays(cursor, recurrenceInterval);
+    } else if (recurrenceUnit === "monthly") {
+      cursor = addMonths(cursor, recurrenceInterval);
+    } else {
+      cursor = addDays(cursor, recurrenceInterval * 7);
     }
 
-    for (const req of requestedIntervals) {
-      if (intervalsOverlap(req.start, req.end, existingStart, existingEnd)) {
+    if (recurrenceUntil) {
+      const untilDate = parseAnyDate(recurrenceUntil);
+      if (untilDate && cursor > untilDate) break;
+    }
+
+    if (weekdays.length > 0 && recurrenceUnit === "weekly") {
+      const wd = cursor.getUTCDay();
+      const allowed = weekdays.some((day) => weekdayIndexFromString(day) === wd);
+      if (!allowed) {
+        continue;
+      }
+    }
+
+    const nextStart = new Date(cursor.getTime());
+    const nextEnd = new Date(cursor.getTime() + durationMs);
+
+    intervals.push({ start: nextStart, end: nextEnd });
+    occurrencesCreated += 1;
+
+    if (occurrencesCreated > 500) break;
+  }
+
+  return intervals;
+}
+
+function hasAnyOverlap(requestedIntervals, existingIntervals) {
+  for (const req of requestedIntervals) {
+    for (const ex of existingIntervals) {
+      if (intervalsOverlap(req.start, req.end, ex.start, ex.end)) {
         return true;
       }
     }
+  }
+  return false;
+}
+
+async function hasConflict(propertyId, requestedIntervals) {
+  if (requestedIntervals.length === 0) return false;
+
+  const existingBookings = await fetchBookings(propertyId);
+
+  const bookingIntervals = [];
+  for (const booking of existingBookings) {
+    if (booking.start_at && booking.end_at) {
+      const start = parseAnyDate(booking.start_at);
+      const end = parseAnyDate(booking.end_at);
+      if (start && end && start < end) {
+        bookingIntervals.push({ start, end });
+        continue;
+      }
+    }
+
+    // fallback para reservas antigas sem start/end
+    if (booking.date) {
+      const base = parseUtcDate(booking.date);
+      if (base) {
+        bookingIntervals.push({
+          start: base,
+          end: addDays(base, 1),
+        });
+      }
+    }
+  }
+
+  if (hasAnyOverlap(requestedIntervals, bookingIntervals)) {
+    return true;
+  }
+
+  const recurringContracts = await fetchRecurringContracts(propertyId);
+  const recurringIntervals = [];
+
+  for (const contract of recurringContracts) {
+    recurringIntervals.push(...buildIntervalsFromContract(contract));
+  }
+
+  if (hasAnyOverlap(requestedIntervals, recurringIntervals)) {
+    return true;
   }
 
   return false;
