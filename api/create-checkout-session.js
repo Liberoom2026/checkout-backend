@@ -1,14 +1,7 @@
-import Stripe from 'stripe';
-import { createClient } from '@supabase/supabase-js';
+const Stripe = require('stripe');
+const { createClient } = require('@supabase/supabase-js');
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
-
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 function setCors(res) {
   const origin = process.env.CORS_ORIGIN || '*';
@@ -19,15 +12,19 @@ function setCors(res) {
   res.setHeader('Access-Control-Allow-Credentials', origin !== '*' ? 'true' : 'false');
 }
 
-function json(res, statusCode, data) {
+function sendJson(res, status, data) {
   setCors(res);
-  return res.status(statusCode).json(data);
+  return res.status(status).json(data);
 }
 
 function parseBody(req) {
   if (!req.body) return {};
   if (typeof req.body === 'string') {
-    return JSON.parse(req.body);
+    try {
+      return JSON.parse(req.body);
+    } catch {
+      return {};
+    }
   }
   return req.body;
 }
@@ -37,7 +34,7 @@ function toNumber(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-function firstPositiveNumber(values) {
+function pickPositiveNumber(...values) {
   for (const value of values) {
     const n = toNumber(value);
     if (n !== null && n > 0) return n;
@@ -45,7 +42,7 @@ function firstPositiveNumber(values) {
   return null;
 }
 
-function intervalOverlaps(aStart, aEnd, bStart, bEnd) {
+function overlap(aStart, aEnd, bStart, bEnd) {
   return aStart < bEnd && aEnd > bStart;
 }
 
@@ -62,14 +59,16 @@ function buildWeeklyIntervals(startAt, endAt, count) {
   });
 }
 
-function expandExistingRecurringContract(contract) {
+function expandRecurringContract(contract) {
   const startAt = contract.start_at || contract.startAt;
   const endAt = contract.end_at || contract.endAt;
 
   if (!startAt || !endAt) return [];
 
-  const unit = (contract.recurrence_unit || contract.recurrenceUnit || 'weekly').toLowerCase();
-  const recurrenceMonths = toNumber(contract.recurrence_months ?? contract.recurrenceMonths) || 0;
+  const unit = String(contract.recurrence_unit || contract.recurrenceUnit || 'weekly').toLowerCase();
+  const recurrenceMonths =
+    toNumber(contract.recurrence_months ?? contract.recurrenceMonths) || 0;
+
   const recurrenceCount =
     toNumber(contract.recurrence_count ?? contract.recurrenceCount) ||
     (recurrenceMonths > 0 ? recurrenceMonths * 4 : 1);
@@ -86,24 +85,22 @@ function expandExistingRecurringContract(contract) {
   return buildWeeklyIntervals(startAt, endAt, recurrenceCount);
 }
 
-async function tryInsert(table, payloads) {
+async function insertWithFallback(supabase, table, variants) {
   let lastError = null;
 
-  for (const payload of payloads) {
+  for (const payload of variants) {
     const { data, error } = await supabase.from(table).insert(payload).select('*').single();
-
     if (!error && data) return data;
-
     lastError = error;
   }
 
-  throw lastError;
+  throw lastError || new Error(`Failed inserting into ${table}`);
 }
 
-async function tryUpdate(table, id, payloads) {
+async function updateWithFallback(supabase, table, id, variants) {
   let lastError = null;
 
-  for (const payload of payloads) {
+  for (const payload of variants) {
     const { data, error } = await supabase
       .from(table)
       .update(payload)
@@ -112,14 +109,13 @@ async function tryUpdate(table, id, payloads) {
       .single();
 
     if (!error && data) return data;
-
     lastError = error;
   }
 
   return { error: lastError };
 }
 
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   setCors(res);
 
   if (req.method === 'OPTIONS') {
@@ -127,112 +123,118 @@ export default async function handler(req, res) {
   }
 
   if (req.method !== 'POST') {
-    return json(res, 405, { error: 'Method not allowed' });
+    return sendJson(res, 405, { error: 'Method not allowed' });
   }
 
   try {
-    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY || !process.env.STRIPE_SECRET_KEY) {
-      return json(res, 500, {
+    const SUPABASE_URL = process.env.SUPABASE_URL;
+    const SUPABASE_KEY =
+      process.env.SUPABASE_SERVICE_ROLE_KEY ||
+      process.env.SUPABASE_SECRET_KEY ||
+      process.env.SUPABASE_SERVICE_KEY;
+
+    const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
+
+    if (!SUPABASE_URL || !SUPABASE_KEY || !STRIPE_SECRET_KEY) {
+      return sendJson(res, 500, {
         error: 'Missing required environment variables',
+        details: {
+          has_supabase_url: !!SUPABASE_URL,
+          has_supabase_key: !!SUPABASE_KEY,
+          has_stripe_secret_key: !!STRIPE_SECRET_KEY,
+        },
       });
     }
+
+    const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+    const stripe = new Stripe(STRIPE_SECRET_KEY);
 
     const body = parseBody(req);
 
     const propertyId = toNumber(body.property_id ?? body.propertyId);
     const userId = toNumber(body.user_id ?? body.userId);
-    const startAt = body.start_at ?? body.startAt;
-    const endAt = body.end_at ?? body.endAt;
-    const modeFromClient = (body.mode || '').toLowerCase();
-    const recurrenceUnit = (body.recurrence_unit ?? body.recurrenceUnit ?? 'weekly').toLowerCase();
-
+    const startAtRaw = body.start_at ?? body.startAt;
+    const endAtRaw = body.end_at ?? body.endAt;
     const recurrenceMonthsRaw = body.recurrence_months ?? body.recurrenceMonths;
-    const recurrenceMonths = recurrenceMonthsRaw !== undefined && recurrenceMonthsRaw !== null && recurrenceMonthsRaw !== ''
-      ? toNumber(recurrenceMonthsRaw)
-      : null;
+
+    const recurrenceUnit = String(body.recurrence_unit ?? body.recurrenceUnit ?? 'weekly').toLowerCase();
+    const modeFromClient = String(body.mode ?? '').toLowerCase();
 
     const customerEmail = body.customer_email ?? body.customerEmail ?? null;
     const customerName = body.customer_name ?? body.customerName ?? null;
 
-    if (!propertyId || !startAt || !endAt) {
-      return json(res, 400, {
+    if (!propertyId || !startAtRaw || !endAtRaw) {
+      return sendJson(res, 400, {
         error: 'property_id, start_at and end_at are required',
       });
     }
 
-    const startDate = new Date(startAt);
-    const endDate = new Date(endAt);
+    const startAt = new Date(startAtRaw);
+    const endAt = new Date(endAtRaw);
 
-    if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
-      return json(res, 400, {
+    if (Number.isNaN(startAt.getTime()) || Number.isNaN(endAt.getTime())) {
+      return sendJson(res, 400, {
         error: 'Invalid start_at or end_at',
       });
     }
 
-    if (endDate <= startDate) {
-      return json(res, 400, {
+    if (endAt <= startAt) {
+      return sendJson(res, 400, {
         error: 'end_at must be greater than start_at',
       });
     }
 
-    const propertySelect = await supabase
+    const propertyRes = await supabase
       .from('properties')
       .select('id, title, name, address, currency, price_per_hour, hourly_rate, hourly_price, price')
       .eq('id', propertyId)
       .single();
 
-    if (propertySelect.error || !propertySelect.data) {
-      return json(res, 404, {
+    if (propertyRes.error || !propertyRes.data) {
+      return sendJson(res, 404, {
         error: 'Property not found',
+        details: propertyRes.error?.message || null,
       });
     }
 
-    const property = propertySelect.data;
+    const property = propertyRes.data;
 
-    const pricePerHour = firstPositiveNumber([
+    const pricePerHour = pickPositiveNumber(
       property.price_per_hour,
       property.hourly_rate,
       property.hourly_price,
       property.price,
       body.price_per_hour,
       body.hourly_rate,
-      body.hourly_price,
-    ]);
+      body.hourly_price
+    );
 
     if (!pricePerHour) {
-      return json(res, 400, {
+      return sendJson(res, 400, {
         error: 'Unable to determine price_per_hour for this property',
       });
     }
 
-    const durationHours = (endDate.getTime() - startDate.getTime()) / 36e5;
+    const durationHours = (endAt.getTime() - startAt.getTime()) / 36e5;
     const weeklyAmountCents = Math.max(1, Math.round(durationHours * pricePerHour * 100));
 
-    const hasRecurringRequest =
-      recurrenceMonths !== null ||
-      modeFromClient === 'subscription';
+    const recurrenceRequested = modeFromClient === 'subscription' || recurrenceMonthsRaw !== undefined && recurrenceMonthsRaw !== null && recurrenceMonthsRaw !== '';
+    const recurrenceMonths = recurrenceRequested ? Math.min(12, Math.max(1, toNumber(recurrenceMonthsRaw) || 1)) : 0;
 
-    const checkoutMode = hasRecurringRequest ? 'subscription' : 'payment';
-
-    const normalizedRecurrenceMonths = hasRecurringRequest
-      ? Math.min(12, Math.max(1, toNumber(recurrenceMonths) || 1))
-      : 0;
-
-    if (hasRecurringRequest && recurrenceUnit !== 'weekly') {
-      return json(res, 400, {
+    if (recurrenceRequested && recurrenceUnit !== 'weekly') {
+      return sendJson(res, 400, {
         error: 'Only weekly recurrence is supported',
       });
     }
 
-    const recurrenceCount = hasRecurringRequest ? normalizedRecurrenceMonths * 4 : 1;
+    const recurrenceCount = recurrenceRequested ? recurrenceMonths * 4 : 1;
     const monthlyAmountCents = weeklyAmountCents * 4;
-    const totalAmountCents = checkoutMode === 'subscription'
-      ? monthlyAmountCents
-      : weeklyAmountCents;
+    const totalAmountCents = recurrenceRequested ? monthlyAmountCents : weeklyAmountCents;
+    const checkoutMode = recurrenceRequested ? 'subscription' : 'payment';
 
     const requestedIntervals = buildWeeklyIntervals(startAt, endAt, recurrenceCount);
-    const requestWindowStart = requestedIntervals[0].start_at;
-    const requestWindowEnd = requestedIntervals[requestedIntervals.length - 1].end_at;
+    const requestedWindowStart = requestedIntervals[0].start_at;
+    const requestedWindowEnd = requestedIntervals[requestedIntervals.length - 1].end_at;
 
     const activeBookingStatuses = [
       'pending',
@@ -258,8 +260,8 @@ export default async function handler(req, res) {
         .select('id, start_at, end_at, status')
         .eq('property_id', propertyId)
         .in('status', activeBookingStatuses)
-        .lt('start_at', requestWindowEnd.toISOString())
-        .gt('end_at', requestWindowStart.toISOString()),
+        .lt('start_at', requestedWindowEnd.toISOString())
+        .gt('end_at', requestedWindowStart.toISOString()),
 
       supabase
         .from('recurring_contracts')
@@ -269,106 +271,97 @@ export default async function handler(req, res) {
     ]);
 
     if (bookingsRes.error) {
-      return json(res, 500, {
+      return sendJson(res, 500, {
         error: 'Error checking bookings conflicts',
         details: bookingsRes.error.message,
       });
     }
 
     if (contractsRes.error) {
-      return json(res, 500, {
+      return sendJson(res, 500, {
         error: 'Error checking recurring contracts conflicts',
         details: contractsRes.error.message,
       });
     }
 
-    const conflicts = [];
-
-    for (const existing of bookingsRes.data || []) {
-      const existingStart = new Date(existing.start_at);
-      const existingEnd = new Date(existing.end_at);
+    for (const booking of bookingsRes.data || []) {
+      const existingStart = new Date(booking.start_at);
+      const existingEnd = new Date(booking.end_at);
 
       for (const requested of requestedIntervals) {
-        if (intervalOverlaps(requested.start_at, requested.end_at, existingStart, existingEnd)) {
-          conflicts.push({
-            source: 'bookings',
-            id: existing.id,
-            start_at: existing.start_at,
-            end_at: existing.end_at,
+        if (overlap(requested.start_at, requested.end_at, existingStart, existingEnd)) {
+          return sendJson(res, 409, {
+            error: 'Schedule conflict detected',
+            conflict: {
+              source: 'bookings',
+              id: booking.id,
+              start_at: booking.start_at,
+              end_at: booking.end_at,
+            },
           });
-          break;
         }
       }
-
-      if (conflicts.length) break;
     }
 
-    if (!conflicts.length) {
-      for (const contract of contractsRes.data || []) {
-        const expanded = expandExistingRecurringContract(contract);
+    for (const contract of contractsRes.data || []) {
+      const expanded = expandRecurringContract(contract);
 
-        for (const existing of expanded) {
-          for (const requested of requestedIntervals) {
-            if (intervalOverlaps(requested.start_at, requested.end_at, existing.start_at, existing.end_at)) {
-              conflicts.push({
+      for (const existing of expanded) {
+        for (const requested of requestedIntervals) {
+          if (overlap(requested.start_at, requested.end_at, existing.start_at, existing.end_at)) {
+            return sendJson(res, 409, {
+              error: 'Schedule conflict detected',
+              conflict: {
                 source: 'recurring_contracts',
                 id: contract.id,
                 start_at: contract.start_at,
                 end_at: contract.end_at,
-              });
-              break;
-            }
+              },
+            });
           }
-
-          if (conflicts.length) break;
         }
-
-        if (conflicts.length) break;
       }
     }
 
-    if (conflicts.length) {
-      return json(res, 409, {
-        error: 'Schedule conflict detected',
-        conflict: conflicts[0],
-      });
-    }
+    const bookingStatus = 'pending';
 
-    const bookingStatus = checkoutMode === 'subscription' ? 'pending_subscription' : 'pending_payment';
-
-    const bookingInsertVariants = [
+    const booking = await insertWithFallback(supabase, 'bookings', [
       {
         property_id: propertyId,
         user_id: userId,
-        start_at: startDate.toISOString(),
-        end_at: endDate.toISOString(),
+        start_at: startAt.toISOString(),
+        end_at: endAt.toISOString(),
         status: bookingStatus,
-        recurrence_unit: hasRecurringRequest ? 'weekly' : null,
-        recurrence_months: hasRecurringRequest ? normalizedRecurrenceMonths : null,
-        recurrence_count: hasRecurringRequest ? recurrenceCount : null,
+        recurrence_unit: recurrenceRequested ? 'weekly' : null,
+        recurrence_months: recurrenceRequested ? recurrenceMonths : null,
+        recurrence_count: recurrenceRequested ? recurrenceCount : null,
         weekly_amount_cents: weeklyAmountCents,
-        monthly_amount_cents: hasRecurringRequest ? monthlyAmountCents : null,
+        monthly_amount_cents: recurrenceRequested ? monthlyAmountCents : null,
         total_amount_cents: totalAmountCents,
       },
       {
         property_id: propertyId,
         user_id: userId,
-        start_at: startDate.toISOString(),
-        end_at: endDate.toISOString(),
+        start_at: startAt.toISOString(),
+        end_at: endAt.toISOString(),
         status: bookingStatus,
       },
-    ];
+      {
+        property_id: propertyId,
+        start_at: startAt.toISOString(),
+        end_at: endAt.toISOString(),
+        status: bookingStatus,
+      },
+    ]);
 
-    const booking = await tryInsert('bookings', bookingInsertVariants);
-
-    const frontendUrl = (process.env.FRONTEND_URL || req.headers.origin || 'http://localhost:3000').replace(/\/$/, '');
+    const frontendUrl = String(process.env.FRONTEND_URL || req.headers.origin || 'http://localhost:3000').replace(/\/$/, '');
     const successUrl = `${frontendUrl}/checkout/success?session_id={CHECKOUT_SESSION_ID}`;
     const cancelUrl = `${frontendUrl}/checkout/cancel?booking_id=${booking.id}`;
 
     const propertyLabel = property.title || property.name || property.address || `Espaço ${propertyId}`;
     const currency = String(property.currency || body.currency || 'brl').toLowerCase();
 
-    const sessionPayload = {
+    const sessionOptions = {
       mode: checkoutMode,
       success_url: successUrl,
       cancel_url: cancelUrl,
@@ -379,11 +372,11 @@ export default async function handler(req, res) {
         booking_id: String(booking.id),
         property_id: String(propertyId),
         user_id: userId ? String(userId) : '',
-        start_at: startDate.toISOString(),
-        end_at: endDate.toISOString(),
-        recurrence_unit: hasRecurringRequest ? 'weekly' : '',
-        recurrence_months: hasRecurringRequest ? String(normalizedRecurrenceMonths) : '',
-        recurrence_count: hasRecurringRequest ? String(recurrenceCount) : '',
+        start_at: startAt.toISOString(),
+        end_at: endAt.toISOString(),
+        recurrence_unit: recurrenceRequested ? 'weekly' : '',
+        recurrence_months: recurrenceRequested ? String(recurrenceMonths) : '',
+        recurrence_count: recurrenceRequested ? String(recurrenceCount) : '',
       },
       line_items: [
         {
@@ -393,8 +386,8 @@ export default async function handler(req, res) {
             unit_amount: totalAmountCents,
             product_data: {
               name: propertyLabel,
-              description: hasRecurringRequest
-                ? `Locação semanal recorrente (${normalizedRecurrenceMonths} mês(es))`
+              description: recurrenceRequested
+                ? `Locação semanal recorrente (${recurrenceMonths} mês(es))`
                 : 'Reserva de espaço',
             },
             ...(checkoutMode === 'subscription'
@@ -407,55 +400,60 @@ export default async function handler(req, res) {
           },
         },
       ],
-      ...(checkoutMode === 'subscription'
-        ? {
-            subscription_data: {
-              metadata: {
-                booking_id: String(booking.id),
-                property_id: String(propertyId),
-                recurrence_unit: 'weekly',
-                recurrence_months: String(normalizedRecurrenceMonths),
-                recurrence_count: String(recurrenceCount),
-              },
-            },
-          }
-        : {
-            payment_intent_data: {
-              metadata: {
-                booking_id: String(booking.id),
-                property_id: String(propertyId),
-              },
-            },
-          }),
     };
 
-    const checkoutSession = await stripe.checkout.sessions.create(sessionPayload);
+    if (checkoutMode === 'subscription') {
+      sessionOptions.subscription_data = {
+        metadata: {
+          booking_id: String(booking.id),
+          property_id: String(propertyId),
+          recurrence_unit: 'weekly',
+          recurrence_months: String(recurrenceMonths),
+          recurrence_count: String(recurrenceCount),
+        },
+      };
+    } else {
+      sessionOptions.payment_intent_data = {
+        metadata: {
+          booking_id: String(booking.id),
+          property_id: String(propertyId),
+        },
+      };
+    }
 
-    await tryUpdate('bookings', booking.id, [
+    const checkoutSession = await stripe.checkout.sessions.create(sessionOptions);
+
+    await updateWithFallback(supabase, 'bookings', booking.id, [
       {
         stripe_checkout_session_id: checkoutSession.id,
         stripe_checkout_session_url: checkoutSession.url,
         status: bookingStatus,
       },
       {
+        stripe_checkout_session_id: checkoutSession.id,
+        stripe_checkout_session_url: checkoutSession.url,
+      },
+      {
         status: bookingStatus,
       },
     ]);
 
-    return json(res, 200, {
+    return sendJson(res, 200, {
       url: checkoutSession.url,
       checkout_session_id: checkoutSession.id,
       booking_id: booking.id,
       mode: checkoutMode,
       weekly_amount_cents: weeklyAmountCents,
       monthly_amount_cents: monthlyAmountCents,
-      recurrence_months: normalizedRecurrenceMonths,
+      recurrence_months: recurrenceMonths,
       recurrence_count: recurrenceCount,
     });
   } catch (error) {
-    return json(res, 500, {
+    console.error('create-checkout-session error:', error);
+
+    return sendJson(res, 500, {
       error: 'Internal server error',
       details: error?.message || String(error),
     });
   }
-}
+};
