@@ -17,16 +17,16 @@ function toPositiveInt(value) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+function safeDate(value) {
+  if (!value || value === "") return null;
+  return value;
+}
+
 function getPeriodPrice(property, period) {
   if (period === "morning") return toNumber(property.price_morning);
   if (period === "afternoon") return toNumber(property.price_afternoon);
   if (period === "evening") return toNumber(property.price_evening);
   return 0;
-}
-
-function safeDate(value) {
-  if (!value || value === "") return null;
-  return value;
 }
 
 function calcAmountCents(property, body) {
@@ -134,16 +134,150 @@ function calcAmountCents(property, body) {
   return amountCents;
 }
 
+function parseUtcDate(dateStr) {
+  if (!dateStr) return null;
+  const d = new Date(`${dateStr}T00:00:00.000Z`);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function parseAnyDate(dateStr) {
+  if (!dateStr) return null;
+  const d = new Date(dateStr);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function addDays(date, days) {
+  const d = new Date(date.getTime());
+  d.setUTCDate(d.getUTCDate() + days);
+  return d;
+}
+
+function addMonths(date, months) {
+  const d = new Date(date.getTime());
+  const day = d.getUTCDate();
+  d.setUTCMonth(d.getUTCMonth() + months);
+
+  // Ajuste simples para meses com menos dias
+  if (d.getUTCDate() < day) {
+    d.setUTCDate(0);
+  }
+
+  return d;
+}
+
+function intervalsOverlap(aStart, aEnd, bStart, bEnd) {
+  return aStart < bEnd && aEnd > bStart;
+}
+
+function buildRequestedIntervals(body) {
+  const type = body.reservation_type || "time";
+  const items = Array.isArray(body.reservation_items) ? body.reservation_items : [];
+
+  const intervals = [];
+
+  if (type === "full_property") {
+    const startDate = body.date || body.start_date || body.start_at;
+    const monthsCount = toPositiveInt(body.months_count) || 3;
+
+    const start = body.start_at ? parseAnyDate(body.start_at) : parseUtcDate(startDate);
+    if (start) {
+      const end = addMonths(start, monthsCount);
+      intervals.push({ start, end });
+    }
+
+    return intervals;
+  }
+
+  if (items.length > 0) {
+    for (const item of items) {
+      let start = null;
+      let end = null;
+
+      if (item.start_at && item.end_at) {
+        start = parseAnyDate(item.start_at);
+        end = parseAnyDate(item.end_at);
+      } else if (item.date) {
+        const base = parseUtcDate(item.date);
+        if (base) {
+          if (type === "day") {
+            start = base;
+            end = addDays(base, 1);
+          } else if (type === "period") {
+            const period = item.period || body.period || "morning";
+            const fixedWindows = {
+              morning: { start: "08:00", end: "12:00" },
+              afternoon: { start: "13:00", end: "17:00" },
+              evening: { start: "18:00", end: "22:00" },
+            };
+            const window = fixedWindows[period] || fixedWindows.morning;
+            start = parseAnyDate(`${item.date}T${window.start}:00`);
+            end = parseAnyDate(`${item.date}T${window.end}:00`);
+          } else if (type === "time") {
+            if (item.startTime && item.endTime) {
+              start = parseAnyDate(`${item.date}T${item.startTime}:00`);
+              end = parseAnyDate(`${item.date}T${item.endTime}:00`);
+            }
+          }
+        }
+      }
+
+      if (start && end && start < end) {
+        intervals.push({ start, end });
+      }
+    }
+  }
+
+  if (intervals.length > 0) return intervals;
+
+  // Fallback para payload antigo / simples
+  if (body.start_at && body.end_at) {
+    const start = parseAnyDate(body.start_at);
+    const end = parseAnyDate(body.end_at);
+    if (start && end && start < end) {
+      intervals.push({ start, end });
+      return intervals;
+    }
+  }
+
+  if (body.date) {
+    const base = parseUtcDate(body.date);
+    if (base) {
+      if (type === "day") {
+        intervals.push({ start: base, end: addDays(base, 1) });
+      } else if (type === "period") {
+        const period = body.period || "morning";
+        const fixedWindows = {
+          morning: { start: "08:00", end: "12:00" },
+          afternoon: { start: "13:00", end: "17:00" },
+          evening: { start: "18:00", end: "22:00" },
+        };
+        const window = fixedWindows[period] || fixedWindows.morning;
+        const start = parseAnyDate(`${body.date}T${window.start}:00`);
+        const end = parseAnyDate(`${body.date}T${window.end}:00`);
+        if (start && end) intervals.push({ start, end });
+      } else if (type === "time") {
+        if (body.start_at && body.end_at) {
+          const start = parseAnyDate(body.start_at);
+          const end = parseAnyDate(body.end_at);
+          if (start && end) intervals.push({ start, end });
+        }
+      }
+    }
+  }
+
+  return intervals;
+}
+
 async function fetchProperty(propertyId) {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) {
     throw new Error("Variáveis SUPABASE_URL ou SUPABASE_SERVICE_ROLE ausentes");
   }
 
-  const selectFields = "id,title,price_per_hour,price_per_day,price_per_month,price_morning,price_afternoon,price_evening,min_months_full_rental";
+  const selectFields =
+    "id,title,price_per_hour,price_per_day,price_per_month,price_morning,price_afternoon,price_evening,min_months_full_rental";
 
-  // 1) tenta spaces
   let res = await fetch(
-    `${SUPABASE_URL}/rest/v1/spaces?id=eq.${propertyId}&select=${encodeURIComponent(selectFields)}`,
+    `${SUPABASE_URL}/rest/v1/properties?id=eq.${propertyId}&select=${encodeURIComponent(selectFields)}`,
     {
       headers: {
         apikey: SUPABASE_SERVICE_ROLE,
@@ -155,22 +289,7 @@ async function fetchProperty(propertyId) {
   let raw = await res.text();
 
   if (!res.ok) {
-    // 2) fallback para properties, se o projeto ainda usar esse nome em algum lugar
-    res = await fetch(
-      `${SUPABASE_URL}/rest/v1/properties?id=eq.${propertyId}&select=${encodeURIComponent(selectFields)}`,
-      {
-        headers: {
-          apikey: SUPABASE_SERVICE_ROLE,
-          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`,
-        },
-      }
-    );
-
-    raw = await res.text();
-
-    if (!res.ok) {
-      throw new Error(`Erro ao buscar imóvel: ${raw}`);
-    }
+    throw new Error(`Erro ao buscar imóvel: ${raw}`);
   }
 
   const data = raw ? JSON.parse(raw) : [];
@@ -181,6 +300,58 @@ async function fetchProperty(propertyId) {
   }
 
   return property;
+}
+
+async function hasConflict(propertyId, requestedIntervals) {
+  if (requestedIntervals.length === 0) return false;
+
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/bookings?property_id=eq.${propertyId}&status=neq.cancelled&select=id,start_at,end_at,date,reservation_type`,
+    {
+      headers: {
+        apikey: SUPABASE_SERVICE_ROLE,
+        Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`,
+      },
+    }
+  );
+
+  const raw = await res.text();
+
+  if (!res.ok) {
+    throw new Error(`Erro ao consultar reservas: ${raw}`);
+  }
+
+  const existingBookings = raw ? JSON.parse(raw) : [];
+
+  for (const booking of existingBookings) {
+    const existingStart = booking.start_at ? parseAnyDate(booking.start_at) : null;
+    const existingEnd = booking.end_at ? parseAnyDate(booking.end_at) : null;
+
+    if (!existingStart || !existingEnd) {
+      // Fallback para reservas antigas sem start/end
+      if (booking.date) {
+        const base = parseUtcDate(booking.date);
+        if (base) {
+          const dayStart = base;
+          const dayEnd = addDays(base, 1);
+          for (const req of requestedIntervals) {
+            if (intervalsOverlap(req.start, req.end, dayStart, dayEnd)) {
+              return true;
+            }
+          }
+        }
+      }
+      continue;
+    }
+
+    for (const req of requestedIntervals) {
+      if (intervalsOverlap(req.start, req.end, existingStart, existingEnd)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 async function createBooking(body, amount) {
@@ -285,6 +456,16 @@ export default async function handler(req, res) {
     }
 
     const property = await fetchProperty(body.property_id);
+
+    const requestedIntervals = buildRequestedIntervals(body);
+    const conflict = await hasConflict(body.property_id, requestedIntervals);
+
+    if (conflict) {
+      return res.status(409).json({
+        error: "Este horário já está reservado",
+      });
+    }
+
     const amountCents = calcAmountCents(property, body);
     const amountBRL = amountCents / 100;
 
