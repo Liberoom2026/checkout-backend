@@ -60,79 +60,28 @@ function buildWeeklyIntervals(startAt, endAt, count) {
 }
 
 function expandRecurringContract(contract) {
-  const startAt = contract.start_at || contract.startAt;
-  const endAt = contract.end_at || contract.endAt;
+  const startAt = contract.start_at;
+  const endAt = contract.end_at;
 
   if (!startAt || !endAt) return [];
 
-  const unit = String(contract.recurrence_unit || contract.recurrenceUnit || 'weekly').toLowerCase();
-  const recurrenceMonths =
-    toNumber(contract.recurrence_months ?? contract.recurrenceMonths) || 0;
-
+  const recurrenceMonths = Number(contract.recurrence_months || 0);
   const recurrenceCount =
-    toNumber(contract.recurrence_count ?? contract.recurrenceCount) ||
+    Number(contract.recurrence_count) ||
     (recurrenceMonths > 0 ? recurrenceMonths * 4 : 1);
 
-  if (unit !== 'weekly') {
-    return [
-      {
-        start_at: new Date(startAt),
-        end_at: new Date(endAt),
-      },
-    ];
-  }
-
   return buildWeeklyIntervals(startAt, endAt, recurrenceCount);
-}
-
-async function insertWithFallback(supabase, table, variants) {
-  let lastError = null;
-
-  for (const payload of variants) {
-    const { data, error } = await supabase.from(table).insert(payload).select('*').single();
-    if (!error && data) return data;
-    lastError = error;
-  }
-
-  throw lastError || new Error(`Failed inserting into ${table}`);
-}
-
-async function updateWithFallback(supabase, table, id, variants) {
-  let lastError = null;
-
-  for (const payload of variants) {
-    const { data, error } = await supabase
-      .from(table)
-      .update(payload)
-      .eq('id', id)
-      .select('*')
-      .single();
-
-    if (!error && data) return data;
-    lastError = error;
-  }
-
-  return { error: lastError };
 }
 
 module.exports = async function handler(req, res) {
   setCors(res);
 
-  if (req.method === 'OPTIONS') {
-    return res.status(204).end();
-  }
-
-  if (req.method !== 'POST') {
-    return sendJson(res, 405, { error: 'Method not allowed' });
-  }
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  if (req.method !== 'POST') return sendJson(res, 405, { error: 'Method not allowed' });
 
   try {
     const SUPABASE_URL = process.env.SUPABASE_URL;
-    const SUPABASE_KEY =
-      process.env.SUPABASE_SERVICE_ROLE_KEY ||
-      process.env.SUPABASE_SECRET_KEY ||
-      process.env.SUPABASE_SERVICE_KEY;
-
+    const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
     const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
 
     if (!SUPABASE_URL || !SUPABASE_KEY || !STRIPE_SECRET_KEY) {
@@ -151,309 +100,107 @@ module.exports = async function handler(req, res) {
 
     const body = parseBody(req);
 
-    const propertyId = toNumber(body.property_id ?? body.propertyId);
-    const userId = toNumber(body.user_id ?? body.userId);
-    const startAtRaw = body.start_at ?? body.startAt;
-    const endAtRaw = body.end_at ?? body.endAt;
-    const recurrenceMonthsRaw = body.recurrence_months ?? body.recurrenceMonths;
+    const propertyId = Number(body.property_id);
+    const startAt = new Date(body.start_at);
+    const endAt = new Date(body.end_at);
+    const recurrenceMonths = Number(body.recurrence_months || 0);
 
-    const recurrenceUnit = String(body.recurrence_unit ?? body.recurrenceUnit ?? 'weekly').toLowerCase();
-    const modeFromClient = String(body.mode ?? '').toLowerCase();
-
-    const customerEmail = body.customer_email ?? body.customerEmail ?? null;
-    const customerName = body.customer_name ?? body.customerName ?? null;
-
-    if (!propertyId || !startAtRaw || !endAtRaw) {
-      return sendJson(res, 400, {
-        error: 'property_id, start_at and end_at are required',
-      });
+    if (!propertyId || !startAt || !endAt) {
+      return sendJson(res, 400, { error: 'Missing required fields' });
     }
 
-    const startAt = new Date(startAtRaw);
-    const endAt = new Date(endAtRaw);
-
-    if (Number.isNaN(startAt.getTime()) || Number.isNaN(endAt.getTime())) {
-      return sendJson(res, 400, {
-        error: 'Invalid start_at or end_at',
-      });
-    }
-
-    if (endAt <= startAt) {
-      return sendJson(res, 400, {
-        error: 'end_at must be greater than start_at',
-      });
-    }
-
-    const propertyRes = await supabase
+    // 🔥 BUSCA PROPERTY (CORRIGIDO AQUI)
+    const { data: property, error: propError } = await supabase
       .from('properties')
-      .select('id, title, name, address, currency, price_per_hour, hourly_rate, hourly_price, price')
+      .select('id, title, address, currency, price_per_hour, price')
       .eq('id', propertyId)
       .single();
 
-    if (propertyRes.error || !propertyRes.data) {
-      return sendJson(res, 404, {
-        error: 'Property not found',
-        details: propertyRes.error?.message || null,
-      });
+    if (propError || !property) {
+      return sendJson(res, 404, { error: 'Property not found' });
     }
 
-    const property = propertyRes.data;
-
-    const pricePerHour = pickPositiveNumber(
-      property.price_per_hour,
-      property.hourly_rate,
-      property.hourly_price,
-      property.price,
-      body.price_per_hour,
-      body.hourly_rate,
-      body.hourly_price
-    );
+    const pricePerHour = property.price_per_hour || property.price;
 
     if (!pricePerHour) {
-      return sendJson(res, 400, {
-        error: 'Unable to determine price_per_hour for this property',
-      });
+      return sendJson(res, 400, { error: 'Property has no price' });
     }
 
-    const durationHours = (endAt.getTime() - startAt.getTime()) / 36e5;
-    const weeklyAmountCents = Math.max(1, Math.round(durationHours * pricePerHour * 100));
+    const durationHours = (endAt - startAt) / 36e5;
+    const weeklyAmount = Math.round(durationHours * pricePerHour * 100);
 
-    const recurrenceRequested = modeFromClient === 'subscription' || recurrenceMonthsRaw !== undefined && recurrenceMonthsRaw !== null && recurrenceMonthsRaw !== '';
-    const recurrenceMonths = recurrenceRequested ? Math.min(12, Math.max(1, toNumber(recurrenceMonthsRaw) || 1)) : 0;
+    const isRecurring = recurrenceMonths > 0;
+    const monthlyAmount = weeklyAmount * 4;
 
-    if (recurrenceRequested && recurrenceUnit !== 'weekly') {
-      return sendJson(res, 400, {
-        error: 'Only weekly recurrence is supported',
-      });
-    }
+    const requestedIntervals = buildWeeklyIntervals(
+      startAt,
+      endAt,
+      isRecurring ? recurrenceMonths * 4 : 1
+    );
 
-    const recurrenceCount = recurrenceRequested ? recurrenceMonths * 4 : 1;
-    const monthlyAmountCents = weeklyAmountCents * 4;
-    const totalAmountCents = recurrenceRequested ? monthlyAmountCents : weeklyAmountCents;
-    const checkoutMode = recurrenceRequested ? 'subscription' : 'payment';
+    // 🔥 CONFLICT CHECK
+    const { data: bookings } = await supabase
+      .from('bookings')
+      .select('start_at, end_at')
+      .eq('property_id', propertyId);
 
-    const requestedIntervals = buildWeeklyIntervals(startAt, endAt, recurrenceCount);
-    const requestedWindowStart = requestedIntervals[0].start_at;
-    const requestedWindowEnd = requestedIntervals[requestedIntervals.length - 1].end_at;
-
-    const activeBookingStatuses = [
-      'pending',
-      'pending_payment',
-      'awaiting_payment',
-      'reserved',
-      'confirmed',
-      'paid',
-      'active',
-      'scheduled',
-    ];
-
-    const activeContractStatuses = [
-      'pending',
-      'confirmed',
-      'active',
-      'scheduled',
-    ];
-
-    const [bookingsRes, contractsRes] = await Promise.all([
-      supabase
-        .from('bookings')
-        .select('id, start_at, end_at, status')
-        .eq('property_id', propertyId)
-        .in('status', activeBookingStatuses)
-        .lt('start_at', requestedWindowEnd.toISOString())
-        .gt('end_at', requestedWindowStart.toISOString()),
-
-      supabase
-        .from('recurring_contracts')
-        .select('id, start_at, end_at, status, recurrence_unit, recurrence_count, recurrence_months')
-        .eq('property_id', propertyId)
-        .in('status', activeContractStatuses),
-    ]);
-
-    if (bookingsRes.error) {
-      return sendJson(res, 500, {
-        error: 'Error checking bookings conflicts',
-        details: bookingsRes.error.message,
-      });
-    }
-
-    if (contractsRes.error) {
-      return sendJson(res, 500, {
-        error: 'Error checking recurring contracts conflicts',
-        details: contractsRes.error.message,
-      });
-    }
-
-    for (const booking of bookingsRes.data || []) {
-      const existingStart = new Date(booking.start_at);
-      const existingEnd = new Date(booking.end_at);
-
-      for (const requested of requestedIntervals) {
-        if (overlap(requested.start_at, requested.end_at, existingStart, existingEnd)) {
-          return sendJson(res, 409, {
-            error: 'Schedule conflict detected',
-            conflict: {
-              source: 'bookings',
-              id: booking.id,
-              start_at: booking.start_at,
-              end_at: booking.end_at,
-            },
-          });
+    for (const existing of bookings || []) {
+      for (const reqInt of requestedIntervals) {
+        if (
+          overlap(
+            reqInt.start_at,
+            reqInt.end_at,
+            new Date(existing.start_at),
+            new Date(existing.end_at)
+          )
+        ) {
+          return sendJson(res, 409, { error: 'Schedule conflict detected' });
         }
       }
     }
 
-    for (const contract of contractsRes.data || []) {
-      const expanded = expandRecurringContract(contract);
-
-      for (const existing of expanded) {
-        for (const requested of requestedIntervals) {
-          if (overlap(requested.start_at, requested.end_at, existing.start_at, existing.end_at)) {
-            return sendJson(res, 409, {
-              error: 'Schedule conflict detected',
-              conflict: {
-                source: 'recurring_contracts',
-                id: contract.id,
-                start_at: contract.start_at,
-                end_at: contract.end_at,
-              },
-            });
-          }
-        }
-      }
-    }
-
-    const bookingStatus = 'pending';
-
-    const booking = await insertWithFallback(supabase, 'bookings', [
-      {
-        property_id: propertyId,
-        user_id: userId,
-        start_at: startAt.toISOString(),
-        end_at: endAt.toISOString(),
-        status: bookingStatus,
-        recurrence_unit: recurrenceRequested ? 'weekly' : null,
-        recurrence_months: recurrenceRequested ? recurrenceMonths : null,
-        recurrence_count: recurrenceRequested ? recurrenceCount : null,
-        weekly_amount_cents: weeklyAmountCents,
-        monthly_amount_cents: recurrenceRequested ? monthlyAmountCents : null,
-        total_amount_cents: totalAmountCents,
-      },
-      {
-        property_id: propertyId,
-        user_id: userId,
-        start_at: startAt.toISOString(),
-        end_at: endAt.toISOString(),
-        status: bookingStatus,
-      },
-      {
+    // 🔥 CRIA BOOKING
+    const { data: booking } = await supabase
+      .from('bookings')
+      .insert({
         property_id: propertyId,
         start_at: startAt.toISOString(),
         end_at: endAt.toISOString(),
-        status: bookingStatus,
-      },
-    ]);
+        status: 'pending',
+      })
+      .select()
+      .single();
 
-    const frontendUrl = String(process.env.FRONTEND_URL || req.headers.origin || 'http://localhost:3000').replace(/\/$/, '');
-    const successUrl = `${frontendUrl}/checkout/success?session_id={CHECKOUT_SESSION_ID}`;
-    const cancelUrl = `${frontendUrl}/checkout/cancel?booking_id=${booking.id}`;
-
-    const propertyLabel = property.title || property.name || property.address || `Espaço ${propertyId}`;
-    const currency = String(property.currency || body.currency || 'brl').toLowerCase();
-
-    const sessionOptions = {
-      mode: checkoutMode,
-      success_url: successUrl,
-      cancel_url: cancelUrl,
-      customer_email: customerEmail || undefined,
-      client_reference_id: String(booking.id),
-      locale: 'pt-BR',
-      metadata: {
-        booking_id: String(booking.id),
-        property_id: String(propertyId),
-        user_id: userId ? String(userId) : '',
-        start_at: startAt.toISOString(),
-        end_at: endAt.toISOString(),
-        recurrence_unit: recurrenceRequested ? 'weekly' : '',
-        recurrence_months: recurrenceRequested ? String(recurrenceMonths) : '',
-        recurrence_count: recurrenceRequested ? String(recurrenceCount) : '',
-      },
+    // 🔥 STRIPE
+    const session = await stripe.checkout.sessions.create({
+      mode: isRecurring ? 'subscription' : 'payment',
+      success_url: `${process.env.FRONTEND_URL}/success`,
+      cancel_url: `${process.env.FRONTEND_URL}/cancel`,
       line_items: [
         {
           quantity: 1,
           price_data: {
-            currency,
-            unit_amount: totalAmountCents,
+            currency: property.currency || 'brl',
+            unit_amount: isRecurring ? monthlyAmount : weeklyAmount,
             product_data: {
-              name: propertyLabel,
-              description: recurrenceRequested
-                ? `Locação semanal recorrente (${recurrenceMonths} mês(es))`
-                : 'Reserva de espaço',
+              name: property.title || property.address,
             },
-            ...(checkoutMode === 'subscription'
-              ? {
-                  recurring: {
-                    interval: 'month',
-                  },
-                }
-              : {}),
+            ...(isRecurring && {
+              recurring: { interval: 'month' },
+            }),
           },
         },
       ],
-    };
-
-    if (checkoutMode === 'subscription') {
-      sessionOptions.subscription_data = {
-        metadata: {
-          booking_id: String(booking.id),
-          property_id: String(propertyId),
-          recurrence_unit: 'weekly',
-          recurrence_months: String(recurrenceMonths),
-          recurrence_count: String(recurrenceCount),
-        },
-      };
-    } else {
-      sessionOptions.payment_intent_data = {
-        metadata: {
-          booking_id: String(booking.id),
-          property_id: String(propertyId),
-        },
-      };
-    }
-
-    const checkoutSession = await stripe.checkout.sessions.create(sessionOptions);
-
-    await updateWithFallback(supabase, 'bookings', booking.id, [
-      {
-        stripe_checkout_session_id: checkoutSession.id,
-        stripe_checkout_session_url: checkoutSession.url,
-        status: bookingStatus,
-      },
-      {
-        stripe_checkout_session_id: checkoutSession.id,
-        stripe_checkout_session_url: checkoutSession.url,
-      },
-      {
-        status: bookingStatus,
-      },
-    ]);
+    });
 
     return sendJson(res, 200, {
-      url: checkoutSession.url,
-      checkout_session_id: checkoutSession.id,
-      booking_id: booking.id,
-      mode: checkoutMode,
-      weekly_amount_cents: weeklyAmountCents,
-      monthly_amount_cents: monthlyAmountCents,
-      recurrence_months: recurrenceMonths,
-      recurrence_count: recurrenceCount,
+      url: session.url,
     });
-  } catch (error) {
-    console.error('create-checkout-session error:', error);
-
+  } catch (err) {
+    console.error(err);
     return sendJson(res, 500, {
       error: 'Internal server error',
-      details: error?.message || String(error),
+      details: err.message,
     });
   }
 };
