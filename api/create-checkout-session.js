@@ -152,6 +152,91 @@ function calcAmountCents(property, body) {
   return amountCents;
 }
 
+function calcRecurringMonthlyAmountCents(property, body) {
+  const type = body.reservation_type || "time";
+
+  const pricePerHour = toNumber(property.price_per_hour);
+  const pricePerDay = toNumber(property.price_per_day);
+  const pricePerMonth = toNumber(property.price_per_month);
+  const fixedPeriodPrice = getPeriodPrice(property, body.period);
+
+  let amountBRL = 0;
+
+  switch (type) {
+    case "full_property": {
+      if (pricePerMonth > 0) {
+        amountBRL = pricePerMonth;
+      } else if (pricePerDay > 0) {
+        amountBRL = pricePerDay * 30;
+      } else if (pricePerHour > 0) {
+        amountBRL = pricePerHour * 8 * 30;
+      } else if (
+        body.amount !== undefined &&
+        body.amount !== null &&
+        body.amount !== ""
+      ) {
+        amountBRL = toNumber(body.amount);
+      } else {
+        throw new Error("Preço mensal não configurado");
+      }
+      break;
+    }
+
+    case "period": {
+      const daysCount = toPositiveInt(body.days_count) || 1;
+      const hours = toPositiveInt(body.duration_hours) || 4;
+
+      if (fixedPeriodPrice > 0) {
+        amountBRL = fixedPeriodPrice * daysCount;
+      } else if (pricePerHour > 0) {
+        amountBRL = pricePerHour * hours * daysCount;
+      } else {
+        throw new Error("Preço do período não configurado");
+      }
+      break;
+    }
+
+    case "day": {
+      const days = toPositiveInt(body.days_count) || 1;
+
+      if (pricePerDay > 0) {
+        amountBRL = pricePerDay * days;
+      } else if (pricePerHour > 0) {
+        amountBRL = pricePerHour * 8 * days;
+      } else {
+        throw new Error("Preço por diária não configurado");
+      }
+      break;
+    }
+
+    case "time":
+    default: {
+      const hours = toPositiveInt(body.duration_hours) || 1;
+
+      if (pricePerHour > 0) {
+        amountBRL = pricePerHour * hours;
+      } else if (
+        body.amount !== undefined &&
+        body.amount !== null &&
+        body.amount !== ""
+      ) {
+        amountBRL = toNumber(body.amount);
+      } else {
+        throw new Error("Preço por hora não configurado");
+      }
+      break;
+    }
+  }
+
+  const amountCents = Math.round(amountBRL * 100);
+
+  if (!Number.isFinite(amountCents) || amountCents <= 0) {
+    throw new Error("Valor calculado inválido");
+  }
+
+  return amountCents;
+}
+
 function parseAnyDate(dateStr) {
   if (!dateStr) return null;
   const d = new Date(dateStr);
@@ -255,7 +340,7 @@ function getIntervalFromSimplePayload(body) {
   if (type === "full_property") {
     const start = body.start_at ? parseAnyDate(body.start_at) : parseUtcDate(body.date);
     if (!start) return null;
-    const months = toPositiveInt(body.months_count) || 3;
+    const months = toPositiveInt(body.recurrence_months || body.months_count) || 3;
     return { start, end: addMonths(start, months) };
   }
 
@@ -264,13 +349,12 @@ function getIntervalFromSimplePayload(body) {
     const start = parseAnyDate(`${body.date}T${window.start}:00`);
     const end = parseAnyDate(`${body.date}T${window.end}:00`);
     if (start && end) return { start, end };
-    return null;
   }
 
   if (type === "time") {
-    if (body.startTime && body.endTime) {
-      const start = parseAnyDate(`${body.date}T${body.startTime}:00`);
-      const end = parseAnyDate(`${body.date}T${body.endTime}:00`);
+    if (body.start_at && body.end_at) {
+      const start = parseAnyDate(body.start_at);
+      const end = parseAnyDate(body.end_at);
       if (start && end) return { start, end };
     }
   }
@@ -327,13 +411,9 @@ function buildRequestedIntervals(body) {
     return baseIntervals;
   }
 
-  const recurrenceUnit =
-    String(
-      body.recurrence_unit ||
-        body.recurrence_frequency ||
-        body.repeat_unit ||
-        "weekly"
-    ).toLowerCase();
+  const recurrenceUnit = String(
+    body.recurrence_unit || body.recurrence_frequency || body.repeat_unit || "monthly"
+  ).toLowerCase();
 
   const recurrenceInterval = Math.max(
     1,
@@ -341,6 +421,7 @@ function buildRequestedIntervals(body) {
   );
 
   const recurrenceCount =
+    toPositiveInt(body.recurrence_months) ||
     toPositiveInt(body.recurrence_count) ||
     toPositiveInt(body.count) ||
     toPositiveInt(body.recurring_count);
@@ -351,6 +432,20 @@ function buildRequestedIntervals(body) {
   const weekdays = normalizeWeekdays(
     body.weekdays || body.days_of_week || body.byday
   );
+
+  // Se for imóvel completo recorrente, tratamos como intervalo contínuo
+  if (type === "full_property") {
+    const interval = baseIntervals[0] || getIntervalFromSimplePayload(body);
+    if (!interval) return [];
+
+    const months = recurrenceCount || toPositiveInt(body.months_count) || 1;
+    const continuous = {
+      start: interval.start,
+      end: addMonths(interval.start, months),
+    };
+
+    return [continuous];
+  }
 
   const expanded = [];
 
@@ -468,7 +563,6 @@ async function fetchRecurringContracts(propertyId) {
   const raw = await res.text();
 
   if (!res.ok) {
-    // Se a tabela não existir ou o schema for diferente, não quebra o checkout inteiro
     return [];
   }
 
@@ -497,13 +591,9 @@ function buildIntervalsFromContract(contract) {
   const base = intervals[0];
   if (!base) return intervals;
 
-  const recurrenceUnit =
-    String(
-      contract.recurrence_unit ||
-        contract.recurrence_frequency ||
-        contract.repeat_unit ||
-        "weekly"
-    ).toLowerCase();
+  const recurrenceUnit = String(
+    contract.recurrence_unit || contract.recurrence_frequency || contract.repeat_unit || "monthly"
+  ).toLowerCase();
 
   const recurrenceInterval = Math.max(
     1,
@@ -511,6 +601,7 @@ function buildIntervalsFromContract(contract) {
   );
 
   const recurrenceCount =
+    toPositiveInt(contract.recurrence_months) ||
     toPositiveInt(contract.recurrence_count) ||
     toPositiveInt(contract.count) ||
     toPositiveInt(contract.recurring_count);
@@ -591,7 +682,6 @@ async function hasConflict(propertyId, requestedIntervals) {
       }
     }
 
-    // fallback para reservas antigas sem start/end
     if (booking.date) {
       const base = parseUtcDate(booking.date);
       if (base) {
@@ -634,7 +724,10 @@ async function createBooking(body, amount) {
     period: body.period || null,
     duration_hours: body.duration_hours ? Number(body.duration_hours) : null,
     days_count: body.days_count ? Number(body.days_count) : null,
-    months_count: body.months_count ? Number(body.months_count) : null,
+    months_count:
+      body.months_count ? Number(body.months_count) :
+      body.recurrence_months ? Number(body.recurrence_months) :
+      null,
     billing_mode: body.billing_mode || "one_time",
     total_amount: amount,
     price_cents: Math.round(amount * 100),
@@ -733,46 +826,84 @@ export default async function handler(req, res) {
       });
     }
 
-    const amountCents = calcAmountCents(property, body);
+    const isRecurring = body.billing_mode === "recurring";
+    const amountCents = isRecurring
+      ? calcRecurringMonthlyAmountCents(property, body)
+      : calcAmountCents(property, body);
+
     const amountBRL = amountCents / 100;
 
     const booking = await createBooking(body, amountBRL);
 
-    const session = await stripe.checkout.sessions.create({
-      mode: "payment",
-      payment_method_types: ["card"],
-      customer_email: body.guest_email || undefined,
-      line_items: [
-        {
-          price_data: {
-            currency: "brl",
-            product_data: {
-              name: property.title || "Reserva",
+    const commonMetadata = {
+      booking_id: String(booking.id),
+      property_id: String(body.property_id || ""),
+      guest_name: String(body.guest_name || "Cliente"),
+      guest_email: String(body.guest_email || ""),
+      phone: String(body.phone || ""),
+      date: String(body.date || ""),
+      start_at: String(body.start_at || ""),
+      end_at: String(body.end_at || ""),
+      reservation_type: String(body.reservation_type || "time"),
+      period: String(body.period || ""),
+      duration_hours: String(body.duration_hours || ""),
+      days_count: String(body.days_count || ""),
+      months_count: String(body.months_count || ""),
+      billing_mode: String(body.billing_mode || "one_time"),
+      recurrence_months: String(body.recurrence_months || ""),
+      recurrence_unit: String(body.recurrence_unit || ""),
+      recurrence_count: String(body.recurrence_count || ""),
+    };
+
+    const session = await stripe.checkout.sessions.create(
+      isRecurring
+        ? {
+            mode: "subscription",
+            payment_method_types: ["card"],
+            customer_email: body.guest_email || undefined,
+            line_items: [
+              {
+                price_data: {
+                  currency: "brl",
+                  product_data: {
+                    name: property.title ? `Reserva mensal - ${property.title}` : "Reserva mensal",
+                  },
+                  unit_amount: amountCents,
+                  recurring: {
+                    interval: "month",
+                  },
+                },
+                quantity: 1,
+              },
+            ],
+            subscription_data: {
+              metadata: commonMetadata,
             },
-            unit_amount: amountCents,
-          },
-          quantity: 1,
-        },
-      ],
-      metadata: {
-        booking_id: String(booking.id),
-        property_id: String(body.property_id || ""),
-        guest_name: String(body.guest_name || "Cliente"),
-        guest_email: String(body.guest_email || ""),
-        phone: String(body.phone || ""),
-        date: String(body.date || ""),
-        start_at: String(body.start_at || ""),
-        end_at: String(body.end_at || ""),
-        reservation_type: String(body.reservation_type || "time"),
-        period: String(body.period || ""),
-        duration_hours: String(body.duration_hours || ""),
-        days_count: String(body.days_count || ""),
-        months_count: String(body.months_count || ""),
-        billing_mode: String(body.billing_mode || "one_time"),
-      },
-      success_url: "https://liberoom.com.br/pagamento-sucesso",
-      cancel_url: "https://liberoom.com.br/pagamento-cancelado",
-    });
+            metadata: commonMetadata,
+            success_url: "https://liberoom.com.br/pagamento-sucesso",
+            cancel_url: "https://liberoom.com.br/pagamento-cancelado",
+          }
+        : {
+            mode: "payment",
+            payment_method_types: ["card"],
+            customer_email: body.guest_email || undefined,
+            line_items: [
+              {
+                price_data: {
+                  currency: "brl",
+                  product_data: {
+                    name: property.title || "Reserva",
+                  },
+                  unit_amount: amountCents,
+                },
+                quantity: 1,
+              },
+            ],
+            metadata: commonMetadata,
+            success_url: "https://liberoom.com.br/pagamento-sucesso",
+            cancel_url: "https://liberoom.com.br/pagamento-cancelado",
+          }
+    );
 
     await updateBookingStripeSession(booking.id, session.id);
 
