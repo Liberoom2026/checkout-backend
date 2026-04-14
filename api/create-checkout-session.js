@@ -33,6 +33,21 @@ function toNumber(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+function firstString(...values) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+function firstPositiveNumber(...values) {
+  for (const value of values) {
+    const n = toNumber(value);
+    if (n !== null && n > 0) return n;
+  }
+  return null;
+}
+
 function overlap(aStart, aEnd, bStart, bEnd) {
   return aStart < bEnd && aEnd > bStart;
 }
@@ -61,6 +76,36 @@ function expandRecurringContract(contract) {
     (recurrenceMonths > 0 ? recurrenceMonths * 4 : 1);
 
   return buildWeeklyIntervals(startAt, endAt, recurrenceCount);
+}
+
+async function insertBookingWithFallback(supabase, payloads) {
+  let lastError = null;
+
+  for (const payload of payloads) {
+    const { data, error } = await supabase.from('bookings').insert(payload).select('*').single();
+    if (!error && data) return data;
+    lastError = error;
+  }
+
+  throw lastError || new Error('Failed to create booking');
+}
+
+async function updateBookingWithFallback(supabase, bookingId, payloads) {
+  let lastError = null;
+
+  for (const payload of payloads) {
+    const { data, error } = await supabase
+      .from('bookings')
+      .update(payload)
+      .eq('id', bookingId)
+      .select('*')
+      .single();
+
+    if (!error && data) return data;
+    lastError = error;
+  }
+
+  return { error: lastError };
 }
 
 module.exports = async function handler(req, res) {
@@ -130,7 +175,7 @@ module.exports = async function handler(req, res) {
 
     const propertyRes = await supabase
       .from('properties')
-      .select('id, title, address, currency, price_per_hour, hourly_rate, hourly_price, price')
+      .select('*')
       .eq('id', propertyId)
       .single();
 
@@ -144,14 +189,15 @@ module.exports = async function handler(req, res) {
 
     const property = propertyRes.data;
 
-    const pricePerHour =
-      toNumber(property.price_per_hour) ||
-      toNumber(property.hourly_rate) ||
-      toNumber(property.hourly_price) ||
-      toNumber(property.price) ||
-      toNumber(body.price_per_hour) ||
-      toNumber(body.hourly_rate) ||
-      toNumber(body.hourly_price);
+    const pricePerHour = firstPositiveNumber(
+      property.price_per_hour,
+      property.hourly_rate,
+      property.hourly_price,
+      property.price,
+      body.price_per_hour,
+      body.hourly_rate,
+      body.hourly_price
+    );
 
     if (!pricePerHour) {
       return sendJson(res, 400, {
@@ -272,39 +318,48 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    const bookingRes = await supabase
-      .from('bookings')
-      .insert({
+    const booking = await insertBookingWithFallback(supabase, [
+      {
         property_id: propertyId,
         start_at: startAt.toISOString(),
         end_at: endAt.toISOString(),
         status: 'pending',
-      })
-      .select('*')
-      .single();
-
-    if (bookingRes.error || !bookingRes.data) {
-      return sendJson(res, 500, {
-        error: 'Failed to create booking',
-        details: bookingRes.error?.message || null,
-      });
-    }
+        recurrence_unit: recurrenceRequested ? 'weekly' : null,
+        recurrence_months: recurrenceRequested ? recurrenceMonths : null,
+        recurrence_count: recurrenceRequested ? recurrenceCount : null,
+      },
+      {
+        property_id: propertyId,
+        start_at: startAt.toISOString(),
+        end_at: endAt.toISOString(),
+        status: 'pending',
+      },
+    ]);
 
     const frontendUrl = String(
       process.env.FRONTEND_URL || req.headers.origin || 'http://localhost:3000'
     ).replace(/\/$/, '');
 
-    const propertyLabel = property.title || property.address || `Espaço ${propertyId}`;
+    const propertyLabel =
+      firstString(
+        property.title,
+        property.name,
+        property.space_name,
+        property.label,
+        property.address,
+        property.location
+      ) || `Espaço ${propertyId}`;
+
     const currency = String(property.currency || 'brl').toLowerCase();
 
     const sessionOptions = {
       mode: checkoutMode,
       success_url: `${frontendUrl}/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${frontendUrl}/checkout/cancel?booking_id=${bookingRes.data.id}`,
-      client_reference_id: String(bookingRes.data.id),
+      cancel_url: `${frontendUrl}/checkout/cancel?booking_id=${booking.id}`,
+      client_reference_id: String(booking.id),
       locale: 'pt-BR',
       metadata: {
-        booking_id: String(bookingRes.data.id),
+        booking_id: String(booking.id),
         property_id: String(propertyId),
         start_at: startAt.toISOString(),
         end_at: endAt.toISOString(),
@@ -339,7 +394,7 @@ module.exports = async function handler(req, res) {
     if (checkoutMode === 'subscription') {
       sessionOptions.subscription_data = {
         metadata: {
-          booking_id: String(bookingRes.data.id),
+          booking_id: String(booking.id),
           property_id: String(propertyId),
           recurrence_unit: 'weekly',
           recurrence_months: String(recurrenceMonths),
@@ -349,7 +404,7 @@ module.exports = async function handler(req, res) {
     } else {
       sessionOptions.payment_intent_data = {
         metadata: {
-          booking_id: String(bookingRes.data.id),
+          booking_id: String(booking.id),
           property_id: String(propertyId),
         },
       };
@@ -357,15 +412,18 @@ module.exports = async function handler(req, res) {
 
     const checkoutSession = await stripe.checkout.sessions.create(sessionOptions);
 
-    const updateRes = await supabase
-      .from('bookings')
-      .update({
+    const updateRes = await updateBookingWithFallback(supabase, booking.id, [
+      {
         stripe_checkout_session_id: checkoutSession.id,
         stripe_checkout_session_url: checkoutSession.url,
-      })
-      .eq('id', bookingRes.data.id)
-      .select('*')
-      .single();
+      },
+      {
+        stripe_checkout_session_id: checkoutSession.id,
+      },
+      {
+        status: 'pending',
+      },
+    ]);
 
     if (updateRes.error) {
       return sendJson(res, 500, {
@@ -377,7 +435,7 @@ module.exports = async function handler(req, res) {
     return sendJson(res, 200, {
       url: checkoutSession.url,
       checkout_session_id: checkoutSession.id,
-      booking_id: bookingRes.data.id,
+      booking_id: booking.id,
       mode: checkoutMode,
       weekly_amount_cents: weeklyAmountCents,
       monthly_amount_cents: monthlyAmountCents,
