@@ -65,17 +65,153 @@ function buildWeeklyIntervals(startAt, endAt, count) {
   });
 }
 
-function expandRecurringContract(contract) {
-  const startAt = contract.start_at;
-  const endAt = contract.end_at;
-  if (!startAt || !endAt) return [];
+function normalizeWeekday(value) {
+  if (value === null || value === undefined) return null;
 
-  const recurrenceMonths = Number(contract.recurrence_months || 0);
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return ((value % 7) + 7) % 7;
+  }
+
+  const str = String(value).trim().toLowerCase();
+
+  const map = {
+    sun: 0,
+    sunday: 0,
+    dom: 0,
+    mon: 1,
+    monday: 1,
+    seg: 1,
+    tue: 2,
+    tuesday: 2,
+    ter: 2,
+    wed: 3,
+    wednesday: 3,
+    qua: 3,
+    thu: 4,
+    thursday: 4,
+    qui: 4,
+    fri: 5,
+    friday: 5,
+    sex: 5,
+    sat: 6,
+    saturday: 6,
+    sab: 6,
+  };
+
+  if (map[str] !== undefined) return map[str];
+
+  const n = Number(str);
+  if (Number.isFinite(n)) return ((n % 7) + 7) % 7;
+
+  return null;
+}
+
+function combineDateAndTime(dateInput, timeInput) {
+  if (!dateInput || !timeInput) return null;
+
+  const date = new Date(dateInput);
+  if (Number.isNaN(date.getTime())) return null;
+
+  const [hh, mm, ss] = String(timeInput).split(':').map((part) => Number(part));
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+
+  const result = new Date(date);
+  result.setHours(hh || 0, mm || 0, Number.isFinite(ss) ? ss : 0, 0);
+  return result;
+}
+
+function nextWeekdayOnOrAfter(anchorDate, weekday) {
+  const anchor = new Date(anchorDate);
+  if (Number.isNaN(anchor.getTime())) return null;
+
+  const current = anchor.getDay();
+  const delta = (weekday - current + 7) % 7;
+  const next = new Date(anchor);
+  next.setDate(anchor.getDate() + delta);
+  return next;
+}
+
+function expandRecurringContract(contract) {
+  const recurrenceMonths = toNumber(
+    contract.recurrence_months ??
+      contract.recurrenceMonths ??
+      contract.months ??
+      contract.month_count ??
+      contract.month_count
+  ) || 0;
+
   const recurrenceCount =
-    Number(contract.recurrence_count) ||
+    toNumber(contract.recurrence_count ?? contract.recurrenceCount ?? contract.count) ||
     (recurrenceMonths > 0 ? recurrenceMonths * 4 : 1);
 
-  return buildWeeklyIntervals(startAt, endAt, recurrenceCount);
+  if (contract.start_at && contract.end_at) {
+    return buildWeeklyIntervals(contract.start_at, contract.end_at, recurrenceCount);
+  }
+
+  const weekdayRaw =
+    contract.weekday ??
+    contract.day_of_week ??
+    contract.dayOfWeek ??
+    contract.week_day ??
+    contract.weekday_index;
+
+  const startTimeRaw =
+    contract.start_time ??
+    contract.startTime ??
+    contract.begin_time ??
+    contract.beginTime;
+
+  const endTimeRaw =
+    contract.end_time ??
+    contract.endTime ??
+    contract.finish_time ??
+    contract.finishTime;
+
+  const anchorDateRaw =
+    contract.start_date ??
+    contract.startDate ??
+    contract.created_at ??
+    contract.createdAt ??
+    contract.inserted_at ??
+    contract.insertedAt;
+
+  const weekday = normalizeWeekday(weekdayRaw);
+
+  if (weekday !== null && startTimeRaw && endTimeRaw && anchorDateRaw) {
+    const firstDate = nextWeekdayOnOrAfter(anchorDateRaw, weekday);
+    if (!firstDate) return [];
+
+    const baseStart = combineDateAndTime(firstDate, startTimeRaw);
+    const baseEnd = combineDateAndTime(firstDate, endTimeRaw);
+
+    if (!baseStart || !baseEnd) return [];
+
+    return buildWeeklyIntervals(baseStart, baseEnd, recurrenceCount);
+  }
+
+  const startDateRaw =
+    contract.start_date ??
+    contract.startDate ??
+    contract.date ??
+    contract.base_date ??
+    contract.baseDate;
+
+  const endDateRaw =
+    contract.end_date ??
+    contract.endDate ??
+    contract.finish_date ??
+    contract.finishDate;
+
+  if (startDateRaw && endDateRaw) {
+    const baseStart = new Date(startDateRaw);
+    const baseEnd = new Date(endDateRaw);
+
+    if (!Number.isNaN(baseStart.getTime()) && !Number.isNaN(baseEnd.getTime())) {
+      return buildWeeklyIntervals(baseStart, baseEnd, recurrenceCount);
+    }
+  }
+
+  return [];
 }
 
 async function insertBookingWithFallback(supabase, payloads) {
@@ -242,13 +378,6 @@ module.exports = async function handler(req, res) {
       'scheduled',
     ];
 
-    const activeContractStatuses = [
-      'pending',
-      'confirmed',
-      'active',
-      'scheduled',
-    ];
-
     const [bookingsRes, contractsRes] = await Promise.all([
       supabase
         .from('bookings')
@@ -260,9 +389,8 @@ module.exports = async function handler(req, res) {
 
       supabase
         .from('recurring_contracts')
-        .select('id, start_at, end_at, status, recurrence_unit, recurrence_count, recurrence_months')
-        .eq('property_id', propertyId)
-        .in('status', activeContractStatuses),
+        .select('*')
+        .eq('property_id', propertyId),
     ]);
 
     if (bookingsRes.error) {
@@ -309,8 +437,6 @@ module.exports = async function handler(req, res) {
               conflict: {
                 source: 'recurring_contracts',
                 id: contract.id,
-                start_at: contract.start_at,
-                end_at: contract.end_at,
               },
             });
           }
