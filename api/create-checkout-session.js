@@ -75,10 +75,8 @@ module.exports = async function handler(req, res) {
     const endTime = pick(body.end_time, body.endTime) || null;
     const period = pick(body.period) || null;
 
-    const recurrenceType = pick(
-      body.recurrence_type,
-      body.recurrenceType
-    ) || null;
+    const recurrenceType =
+      pick(body.recurrence_type, body.recurrenceType) || null;
     const recurrenceInterval = toNumber(
       pick(body.recurrence_interval, body.recurrenceInterval)
     );
@@ -100,9 +98,9 @@ module.exports = async function handler(req, res) {
 
     const currency = (pick(body.currency) || "brl").toLowerCase();
 
-    const amountFromBody =
-      toNumber(pick(body.amount, body.price_cents, body.priceCents, body.unit_amount, body.unitAmount)) ??
-      null;
+    const amountFromBody = toNumber(
+      pick(body.amount, body.price_cents, body.priceCents, body.unit_amount, body.unitAmount)
+    );
 
     const pricePerHour = toNumber(
       pick(body.price_per_hour, body.pricePerHour)
@@ -112,15 +110,12 @@ module.exports = async function handler(req, res) {
       pick(body.total_amount, body.totalAmount)
     );
 
-    let amount = amountFromBody;
-
-    if (amount === null && totalAmount !== null) {
-      amount = Math.round(totalAmount * 100);
-    }
-
-    if (amount === null && pricePerHour !== null && durationHours !== null) {
-      amount = Math.round(pricePerHour * durationHours * 100);
-    }
+    let amount =
+      amountFromBody ??
+      (totalAmount !== null ? Math.round(totalAmount * 100) : null) ??
+      (pricePerHour !== null && durationHours !== null
+        ? Math.round(pricePerHour * durationHours * 100)
+        : null);
 
     const origin = req.headers.origin || "https://liberoom.com.br";
     const successUrl =
@@ -142,6 +137,7 @@ module.exports = async function handler(req, res) {
       return res.status(400).json({
         error: `Missing required fields: ${missing.join(", ")}`,
         received_keys: Object.keys(body),
+        received_body: body,
       });
     }
 
@@ -165,6 +161,8 @@ module.exports = async function handler(req, res) {
       price_cents: amount,
       currency,
       status: "pending",
+      stripe_checkout_session_id: null,
+      stripe_payment_status: null,
     };
 
     const { data: booking, error: bookingError } = await supabase
