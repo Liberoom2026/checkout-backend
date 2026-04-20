@@ -1,472 +1,68 @@
-const Stripe = require('stripe');
-const { createClient } = require('@supabase/supabase-js');
+const Stripe = require("stripe");
 
-function setCors(res) {
-  const origin = process.env.CORS_ORIGIN || '*';
-  res.setHeader('Access-Control-Allow-Origin', origin);
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  res.setHeader('Access-Control-Allow-Credentials', origin !== '*' ? 'true' : 'false');
-}
-
-function sendJson(res, status, data) {
-  setCors(res);
-  return res.status(status).json(data);
-}
-
-function parseBody(req) {
-  if (!req.body) return {};
-  if (typeof req.body === 'string') {
-    try {
-      return JSON.parse(req.body);
-    } catch {
-      return {};
-    }
-  }
-  return req.body;
-}
-
-function toNumber(value) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
-}
-
-function firstPositiveNumber(...values) {
-  for (const value of values) {
-    const n = toNumber(value);
-    if (n !== null && n > 0) return n;
-  }
-  return null;
-}
-
-function overlap(aStart, aEnd, bStart, bEnd) {
-  return aStart < bEnd && aEnd > bStart;
-}
-
-function buildWeeklyIntervals(startAt, endAt, count) {
-  const baseStart = new Date(startAt);
-  const baseEnd = new Date(endAt);
-
-  return Array.from({ length: count }, (_, index) => {
-    const shift = index * 7 * 24 * 60 * 60 * 1000;
-    return {
-      start_at: new Date(baseStart.getTime() + shift),
-      end_at: new Date(baseEnd.getTime() + shift),
-    };
-  });
-}
-
-function expandRecurringContract(contract) {
-  const startAt = contract.start_at;
-  const endAt = contract.end_at;
-  if (!startAt || !endAt) return [];
-
-  const recurrenceMonths = Number(contract.recurrence_months || 0);
-  const recurrenceCount =
-    Number(contract.recurrence_count) ||
-    (recurrenceMonths > 0 ? recurrenceMonths * 4 : 1);
-
-  return buildWeeklyIntervals(startAt, endAt, recurrenceCount);
-}
-
-async function insertBookingWithFallback(supabase, payloads) {
-  let lastError = null;
-
-  for (const payload of payloads) {
-    const { data, error } = await supabase.from('bookings').insert(payload).select('*').single();
-    if (!error && data) return data;
-    lastError = error;
-  }
-
-  throw lastError || new Error('Failed to create booking');
-}
-
-async function updateBookingWithFallback(supabase, bookingId, payloads) {
-  let lastError = null;
-
-  for (const payload of payloads) {
-    const { data, error } = await supabase
-      .from('bookings')
-      .update(payload)
-      .eq('id', bookingId)
-      .select('*')
-      .single();
-
-    if (!error && data) return data;
-    lastError = error;
-  }
-
-  return { error: lastError };
-}
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
+  apiVersion: "2023-08-16",
+});
 
 module.exports = async function handler(req, res) {
-  setCors(res);
-
-  if (req.method === 'OPTIONS') {
-    return res.status(204).end();
-  }
-
-  if (req.method !== 'POST') {
-    return sendJson(res, 405, { error: 'Method not allowed' });
-  }
-
   try {
-    const SUPABASE_URL = process.env.SUPABASE_URL;
-    const SUPABASE_KEY =
-      process.env.SUPABASE_SERVICE_ROLE_KEY ||
-      process.env.SUPABASE_SECRET_KEY ||
-      process.env.SUPABASE_SERVICE_KEY;
-    const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Method not allowed" });
+    }
 
-    if (!SUPABASE_URL || !SUPABASE_KEY || !STRIPE_SECRET_KEY) {
-      return sendJson(res, 500, {
-        error: 'Missing required environment variables',
-        details: {
-          has_supabase_url: !!SUPABASE_URL,
-          has_supabase_key: !!SUPABASE_KEY,
-          has_stripe_secret_key: !!STRIPE_SECRET_KEY,
-        },
+    const {
+      booking_id,
+      amount,
+      currency = "brl",
+      customer_email,
+      success_url,
+      cancel_url,
+      property_id,
+    } = req.body || {};
+
+    if (!booking_id || !amount || !success_url || !cancel_url) {
+      return res.status(400).json({
+        error: "Missing required fields: booking_id, amount, success_url, cancel_url",
       });
     }
 
-    const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-    const stripe = new Stripe(STRIPE_SECRET_KEY);
-
-    const body = parseBody(req);
-
-    const propertyId = toNumber(body.property_id ?? body.propertyId);
-    const userId = body.user_id ?? body.userId ? String(body.user_id ?? body.userId) : null;
-    const guestName = String(body.guest_name ?? body.guestName ?? '').trim() || null;
-    const guestEmail =
-      String(
-        body.guest_email ??
-          body.guestEmail ??
-          body.customer_email ??
-          body.customerEmail ??
-          ''
-      ).trim() || null;
-
-    const startAtRaw = body.start_at ?? body.startAt;
-    const endAtRaw = body.end_at ?? body.endAt;
-    const recurrenceMonthsRaw = body.recurrence_months ?? body.recurrenceMonths;
-    const recurrenceUnit = String(body.recurrence_unit ?? body.recurrenceUnit ?? 'weekly').toLowerCase();
-    const modeFromClient = String(body.mode ?? '').toLowerCase();
-    const customerEmail = guestEmail;
-
-    if (!propertyId || !startAtRaw || !endAtRaw) {
-      return sendJson(res, 400, {
-        error: 'property_id, start_at and end_at are required',
-      });
-    }
-
-    const startAt = new Date(startAtRaw);
-    const endAt = new Date(endAtRaw);
-
-    if (Number.isNaN(startAt.getTime()) || Number.isNaN(endAt.getTime())) {
-      return sendJson(res, 400, {
-        error: 'Invalid start_at or end_at',
-      });
-    }
-
-    if (endAt <= startAt) {
-      return sendJson(res, 400, {
-        error: 'end_at must be greater than start_at',
-      });
-    }
-
-    const propertyRes = await supabase
-      .from('properties')
-      .select('*')
-      .eq('id', propertyId)
-      .single();
-
-    if (propertyRes.error || !propertyRes.data) {
-      return sendJson(res, 404, {
-        error: 'Property not found',
-        details: propertyRes.error?.message || null,
-        property_id: propertyId,
-      });
-    }
-
-    const property = propertyRes.data;
-    const ownerId = property.owner_id ? String(property.owner_id) : null;
-    const ownerEmail = property.owner_email ? String(property.owner_email) : null;
-
-    const pricePerHour = firstPositiveNumber(
-      property.price_per_hour,
-      property.hourly_rate,
-      property.hourly_price,
-      property.price,
-      body.price_per_hour,
-      body.hourly_rate,
-      body.hourly_price
-    );
-
-    if (!pricePerHour) {
-      return sendJson(res, 400, {
-        error: 'Unable to determine price_per_hour for this property',
-      });
-    }
-
-    const durationHours = (endAt.getTime() - startAt.getTime()) / 36e5;
-    const weeklyAmountCents = Math.max(1, Math.round(durationHours * pricePerHour * 100));
-
-    const recurrenceRequested =
-      modeFromClient === 'subscription' ||
-      (recurrenceMonthsRaw !== undefined && recurrenceMonthsRaw !== null && recurrenceMonthsRaw !== '');
-
-    const recurrenceMonths = recurrenceRequested
-      ? Math.min(12, Math.max(1, toNumber(recurrenceMonthsRaw) || 1))
-      : 0;
-
-    if (recurrenceRequested && recurrenceUnit !== 'weekly') {
-      return sendJson(res, 400, {
-        error: 'Only weekly recurrence is supported',
-      });
-    }
-
-    const recurrenceCount = recurrenceRequested ? recurrenceMonths * 4 : 1;
-    const monthlyAmountCents = weeklyAmountCents * 4;
-    const totalAmountCents = recurrenceRequested ? monthlyAmountCents : weeklyAmountCents;
-    const checkoutMode = recurrenceRequested ? 'subscription' : 'payment';
-
-    const requestedIntervals = buildWeeklyIntervals(startAt, endAt, recurrenceCount);
-    const requestedWindowStart = requestedIntervals[0].start_at;
-    const requestedWindowEnd = requestedIntervals[requestedIntervals.length - 1].end_at;
-
-    const activeBookingStatuses = [
-      'pending',
-      'pending_payment',
-      'awaiting_payment',
-      'reserved',
-      'confirmed',
-      'paid',
-      'active',
-      'scheduled',
-    ];
-
-    const activeContractStatuses = [
-      'pending',
-      'confirmed',
-      'active',
-      'scheduled',
-    ];
-
-    const [bookingsRes, contractsRes] = await Promise.all([
-      supabase
-        .from('bookings')
-        .select('id, start_at, end_at, status')
-        .eq('property_id', propertyId)
-        .in('status', activeBookingStatuses)
-        .lt('start_at', requestedWindowEnd.toISOString())
-        .gt('end_at', requestedWindowStart.toISOString()),
-
-      supabase
-        .from('recurring_contracts')
-        .select('id, start_at, end_at, status, recurrence_unit, recurrence_count, recurrence_months')
-        .eq('property_id', propertyId)
-        .in('status', activeContractStatuses),
-    ]);
-
-    if (bookingsRes.error) {
-      return sendJson(res, 500, {
-        error: 'Error checking bookings conflicts',
-        details: bookingsRes.error.message,
-      });
-    }
-
-    if (contractsRes.error) {
-      return sendJson(res, 500, {
-        error: 'Error checking recurring contracts conflicts',
-        details: contractsRes.error.message,
-      });
-    }
-
-    for (const booking of bookingsRes.data || []) {
-      const existingStart = new Date(booking.start_at);
-      const existingEnd = new Date(booking.end_at);
-
-      for (const requested of requestedIntervals) {
-        if (overlap(requested.start_at, requested.end_at, existingStart, existingEnd)) {
-          return sendJson(res, 409, {
-            error: 'Schedule conflict detected',
-            conflict: {
-              source: 'bookings',
-              id: booking.id,
-              start_at: booking.start_at,
-              end_at: booking.end_at,
-            },
-          });
-        }
-      }
-    }
-
-    for (const contract of contractsRes.data || []) {
-      const expanded = expandRecurringContract(contract);
-
-      for (const existing of expanded) {
-        for (const requested of requestedIntervals) {
-          if (overlap(requested.start_at, requested.end_at, existing.start_at, existing.end_at)) {
-            return sendJson(res, 409, {
-              error: 'Schedule conflict detected',
-              conflict: {
-                source: 'recurring_contracts',
-                id: contract.id,
-              },
-            });
-          }
-        }
-      }
-    }
-
-    const booking = await insertBookingWithFallback(supabase, [
-      {
-        property_id: propertyId,
-        user_id: userId,
-        guest_name: guestName,
-        guest_email: guestEmail,
-        owner_id: ownerId,
-        owner_email: ownerEmail,
-        start_at: startAt.toISOString(),
-        end_at: endAt.toISOString(),
-        status: 'pending',
-        recurrence_unit: recurrenceRequested ? 'weekly' : null,
-        recurrence_months: recurrenceRequested ? recurrenceMonths : null,
-        recurrence_count: recurrenceRequested ? recurrenceCount : null,
-      },
-      {
-        property_id: propertyId,
-        user_id: userId,
-        guest_name: guestName,
-        guest_email: guestEmail,
-        owner_id: ownerId,
-        owner_email: ownerEmail,
-        start_at: startAt.toISOString(),
-        end_at: endAt.toISOString(),
-        status: 'pending',
-      },
-    ]);
-
-    const frontendUrl = String(
-      process.env.FRONTEND_URL || req.headers.origin || 'http://localhost:3000'
-    ).replace(/\/$/, '');
-
-    const propertyLabel =
-      String(property.title || property.name || property.space_name || property.label || property.address || `Espaço ${propertyId}`);
-
-    const currency = String(property.currency || 'brl').toLowerCase();
-
-    const sessionOptions = {
-      mode: checkoutMode,
-      success_url: `${frontendUrl}/pagamento-sucesso`,
-      cancel_url: `${frontendUrl}/pagamento-cancelado`,
-      client_reference_id: String(booking.id),
-      locale: 'pt-BR',
-      metadata: {
-        booking_id: String(booking.id),
-        property_id: String(propertyId),
-        user_id: userId || '',
-        owner_id: ownerId || '',
-        owner_email: ownerEmail || '',
-        guest_name: guestName || '',
-        guest_email: guestEmail || '',
-        start_at: startAt.toISOString(),
-        end_at: endAt.toISOString(),
-        recurrence_unit: recurrenceRequested ? 'weekly' : '',
-        recurrence_months: recurrenceRequested ? String(recurrenceMonths) : '',
-        recurrence_count: recurrenceRequested ? String(recurrenceCount) : '',
-      },
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      payment_method_types: ["card"],
+      customer_email: customer_email || undefined,
+      success_url,
+      cancel_url,
       line_items: [
         {
-          quantity: 1,
           price_data: {
             currency,
-            unit_amount: totalAmountCents,
             product_data: {
-              name: propertyLabel,
-              description: recurrenceRequested
-                ? `Locação semanal recorrente (${recurrenceMonths} mês(es))`
-                : 'Reserva de espaço',
+              name: `Reserva #${booking_id}`,
+              description: property_id ? `Propriedade ${property_id}` : "Reserva Liberoom",
             },
-            ...(checkoutMode === 'subscription'
-              ? { recurring: { interval: 'month' } }
-              : {}),
+            unit_amount: amount,
           },
+          quantity: 1,
         },
       ],
-    };
-
-    if (customerEmail) {
-      sessionOptions.customer_email = customerEmail;
-    }
-
-    if (checkoutMode === 'subscription') {
-      sessionOptions.subscription_data = {
-        metadata: {
-          booking_id: String(booking.id),
-          property_id: String(propertyId),
-          user_id: userId || '',
-          owner_id: ownerId || '',
-          owner_email: ownerEmail || '',
-          guest_name: guestName || '',
-          guest_email: guestEmail || '',
-          recurrence_unit: 'weekly',
-          recurrence_months: String(recurrenceMonths),
-          recurrence_count: String(recurrenceCount),
-          start_at: startAt.toISOString(),
-          end_at: endAt.toISOString(),
-        },
-      };
-    } else {
-      sessionOptions.payment_intent_data = {
-        metadata: {
-          booking_id: String(booking.id),
-          property_id: String(propertyId),
-          user_id: userId || '',
-          owner_id: ownerId || '',
-          owner_email: ownerEmail || '',
-          guest_name: guestName || '',
-          guest_email: guestEmail || '',
-        },
-      };
-    }
-
-    const checkoutSession = await stripe.checkout.sessions.create(sessionOptions);
-
-    const updateRes = await updateBookingWithFallback(supabase, booking.id, [
-      {
-        stripe_checkout_session_id: checkoutSession.id,
-        stripe_checkout_session_url: checkoutSession.url,
+      metadata: {
+        booking_id: String(booking_id),
+        property_id: property_id ? String(property_id) : "",
       },
-      {
-        stripe_checkout_session_id: checkoutSession.id,
+      payment_intent_data: {
+        metadata: {
+          booking_id: String(booking_id),
+          property_id: property_id ? String(property_id) : "",
+        },
       },
-    ]);
-
-    if (updateRes.error) {
-      return sendJson(res, 500, {
-        error: 'Booking created but failed to update checkout session',
-        details: updateRes.error.message,
-      });
-    }
-
-    return sendJson(res, 200, {
-      url: checkoutSession.url,
-      checkout_session_id: checkoutSession.id,
-      booking_id: booking.id,
-      mode: checkoutMode,
-      weekly_amount_cents: weeklyAmountCents,
-      monthly_amount_cents: monthlyAmountCents,
-      recurrence_months: recurrenceMonths,
-      recurrence_count: recurrenceCount,
-      owner_id: ownerId,
-      owner_email: ownerEmail,
     });
-  } catch (error) {
-    console.error('create-checkout-session error:', error);
-    return sendJson(res, 500, {
-      error: 'Internal server error',
-      details: error?.message || String(error),
+
+    return res.status(200).json({
+      url: session.url,
+      id: session.id,
     });
+  } catch (err) {
+    console.error("create-checkout-session error:", err);
+    return res.status(500).json({ error: err.message });
   }
 };
