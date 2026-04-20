@@ -40,7 +40,7 @@ module.exports = async function handler(req, res) {
               name: `Reserva #${booking_id}`,
               description: property_id ? `Propriedade ${property_id}` : "Reserva Liberoom",
             },
-            unit_amount: amount,
+            unit_amount: Number(amount),
           },
           quantity: 1,
         },
@@ -48,12 +48,6 @@ module.exports = async function handler(req, res) {
       metadata: {
         booking_id: String(booking_id),
         property_id: property_id ? String(property_id) : "",
-      },
-      payment_intent_data: {
-        metadata: {
-          booking_id: String(booking_id),
-          property_id: property_id ? String(property_id) : "",
-        },
       },
     });
 
