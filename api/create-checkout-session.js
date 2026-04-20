@@ -13,50 +13,48 @@ module.exports = async function handler(req, res) {
     const {
       booking_id,
       amount,
-      currency = "brl",
       customer_email,
       success_url,
       cancel_url,
-      property_id,
-    } = req.body || {};
+    } = req.body;
 
     if (!booking_id || !amount || !success_url || !cancel_url) {
       return res.status(400).json({
-        error: "Missing required fields: booking_id, amount, success_url, cancel_url",
+        error: "Missing required fields",
       });
     }
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       payment_method_types: ["card"],
-      customer_email: customer_email || undefined,
+      customer_email,
       success_url,
       cancel_url,
+
       line_items: [
         {
           price_data: {
-            currency,
+            currency: "brl",
             product_data: {
               name: `Reserva #${booking_id}`,
-              description: property_id ? `Propriedade ${property_id}` : "Reserva Liberoom",
             },
-            unit_amount: Number(amount),
+            unit_amount: Number(amount), // em centavos
           },
           quantity: 1,
         },
       ],
+
+      // 🔑 ESSENCIAL
       metadata: {
         booking_id: String(booking_id),
-        property_id: property_id ? String(property_id) : "",
       },
     });
 
     return res.status(200).json({
       url: session.url,
-      id: session.id,
     });
   } catch (err) {
-    console.error("create-checkout-session error:", err);
+    console.error(err);
     return res.status(500).json({ error: err.message });
   }
 };
