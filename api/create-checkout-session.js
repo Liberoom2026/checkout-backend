@@ -56,13 +56,9 @@ module.exports = async function handler(req, res) {
     const body =
       typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
 
-    const propertyId = pick(
-      body.property_id,
-      body.propertyId,
-      body.space_id,
-      body.spaceId
+    const propertyId = toNumber(
+      pick(body.property_id, body.propertyId, body.space_id, body.spaceId)
     );
-
     const guestName = pick(body.guest_name, body.guestName, body.name);
     const guestEmail = pick(body.guest_email, body.guestEmail, body.email);
     const date = pick(body.date, body.booking_date, body.bookingDate);
@@ -99,7 +95,13 @@ module.exports = async function handler(req, res) {
     const currency = (pick(body.currency) || "brl").toLowerCase();
 
     const amountFromBody = toNumber(
-      pick(body.amount, body.price_cents, body.priceCents, body.unit_amount, body.unitAmount)
+      pick(
+        body.amount,
+        body.price_cents,
+        body.priceCents,
+        body.unit_amount,
+        body.unitAmount
+      )
     );
 
     const pricePerHour = toNumber(
@@ -110,12 +112,27 @@ module.exports = async function handler(req, res) {
       pick(body.total_amount, body.totalAmount)
     );
 
-    let amount =
-      amountFromBody ??
-      (totalAmount !== null ? Math.round(totalAmount * 100) : null) ??
-      (pricePerHour !== null && durationHours !== null
-        ? Math.round(pricePerHour * durationHours * 100)
-        : null);
+    let amount = amountFromBody;
+
+    if (amount === null && totalAmount !== null) {
+      amount = Math.round(totalAmount * 100);
+    }
+
+    if (amount === null && pricePerHour !== null && durationHours !== null) {
+      amount = Math.round(pricePerHour * durationHours * 100);
+    }
+
+    if (amount === null && propertyId !== null && durationHours !== null) {
+      const { data: property, error: propertyError } = await supabase
+        .from("properties")
+        .select("price_per_hour")
+        .eq("id", propertyId)
+        .single();
+
+      if (!propertyError && property?.price_per_hour != null) {
+        amount = Math.round(Number(property.price_per_hour) * durationHours * 100);
+      }
+    }
 
     const origin = req.headers.origin || "https://liberoom.com.br";
     const successUrl =
