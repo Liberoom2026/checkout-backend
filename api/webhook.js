@@ -48,7 +48,7 @@ module.exports = async function handler(req, res) {
         .from("bookings")
         .update({
           status: "paid",
-          stripe_session_id: session.id,
+          stripe_checkout_session_id: session.id,
           stripe_payment_intent: session.payment_intent || null,
           stripe_payment_status: session.payment_status || null,
         })
