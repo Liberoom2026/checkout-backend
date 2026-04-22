@@ -45,11 +45,6 @@ function parseDate(value) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-function toIsoOrNull(value) {
-  const d = parseDate(value);
-  return d ? d.toISOString() : null;
-}
-
 function parseTime(time) {
   const [h, m] = String(time).split(":").map(Number);
   return h * 60 + m;
@@ -120,19 +115,8 @@ function periodToRange(dateStr, period) {
   return null;
 }
 
-function buildBaseRange(body) {
+function buildBaseRange(body, reservationType) {
   const date = pick(body.date, body.booking_date, body.bookingDate);
-
-  const reservationType = pick(
-    body.reservation_type,
-    body.reservationType,
-    body.booking_type,
-    body.bookingType,
-    body.mode,
-    body.bookingMode
-  );
-
-  const billingMode = pick(body.billing_mode, body.billingMode) || "one_time";
 
   const startTime = pick(body.start_time, body.startTime);
   const endTime = pick(body.end_time, body.endTime);
@@ -142,9 +126,6 @@ function buildBaseRange(body) {
 
   const period = pick(body.period);
 
-  if (!date && !startAtRaw && !endAtRaw) return null;
-
-  // Se o frontend já mandar ISO completo, usa isso direto
   if (startAtRaw && endAtRaw) {
     const startAt = parseDate(startAtRaw);
     const endAt = parseDate(endAtRaw);
@@ -154,32 +135,27 @@ function buildBaseRange(body) {
     }
   }
 
-  // exclusiva ou diária
-  if (
-    reservationType === "exclusive" ||
-    billingMode === "exclusive" ||
-    period === "day"
-  ) {
-    if (!date) return null;
+  if (!date) return null;
+
+  if (reservationType === "exclusive" || reservationType === "day") {
     return {
       startAt: brStartOfDay(date),
       endAt: brEndOfDay(date),
     };
   }
 
-  // período
-  if (period && period !== "day") {
-    if (!date) return null;
+  if (reservationType === "period") {
     const range = periodToRange(date, period);
     if (range) return range;
   }
 
-  // horário
-  if (date && startTime && endTime) {
-    return {
-      startAt: brDateTime(date, startTime),
-      endAt: brDateTime(date, endTime),
-    };
+  if (reservationType === "time") {
+    if (startTime && endTime) {
+      return {
+        startAt: brDateTime(date, startTime),
+        endAt: brDateTime(date, endTime),
+      };
+    }
   }
 
   return null;
@@ -268,16 +244,16 @@ async function getPropertyPrice(propertyId) {
 
 function getAmountForReservation({
   property,
-  billingMode,
+  reservationType,
   period,
   durationHours,
 }) {
-  if (billingMode === "time") {
+  if (reservationType === "time") {
     if (property.price_per_hour == null) return null;
     return Math.round(Number(property.price_per_hour) * durationHours * 100);
   }
 
-  if (billingMode === "period") {
+  if (reservationType === "period") {
     if (period === "morning" && property.price_morning != null) {
       return Math.round(Number(property.price_morning) * 100);
     }
@@ -297,14 +273,14 @@ function getAmountForReservation({
     return null;
   }
 
-  if (billingMode === "day") {
+  if (reservationType === "day") {
     if (property.price_day != null) {
       return Math.round(Number(property.price_day) * 100);
     }
     return null;
   }
 
-  if (billingMode === "exclusive") {
+  if (reservationType === "exclusive") {
     if (property.price_exclusive != null) {
       return Math.round(Number(property.price_exclusive) * 100);
     }
@@ -336,7 +312,18 @@ module.exports = async function handler(req, res) {
     const guestEmail = pick(body.guest_email, body.guestEmail, body.email);
 
     const date = pick(body.date, body.booking_date, body.bookingDate);
-    const billingMode = pick(body.billing_mode, body.billingMode) || "time";
+
+    const reservationType =
+      pick(
+        body.reservation_type,
+        body.reservationType,
+        body.booking_type,
+        body.bookingType,
+        body.mode,
+        body.bookingMode
+      ) || "time";
+
+    const planMode = pick(body.billing_mode, body.billingMode) || "one_time";
 
     const startTime = pick(body.start_time, body.startTime) || null;
     const endTime = pick(body.end_time, body.endTime) || null;
@@ -365,7 +352,7 @@ module.exports = async function handler(req, res) {
         }
       } else if (period) {
         durationHours = periodHours(period);
-      } else if (billingMode === "day" || billingMode === "exclusive") {
+      } else if (reservationType === "day" || reservationType === "exclusive") {
         durationHours = 24;
       }
     }
@@ -393,7 +380,7 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    const baseRange = buildBaseRange(body);
+    const baseRange = buildBaseRange(body, reservationType);
 
     if (!baseRange) {
       return res.status(400).json({
@@ -408,7 +395,7 @@ module.exports = async function handler(req, res) {
 
     let amount = getAmountForReservation({
       property,
-      billingMode,
+      reservationType,
       period,
       durationHours,
     });
@@ -427,7 +414,8 @@ module.exports = async function handler(req, res) {
       guest_email: String(guestEmail),
       date: date ? String(date) : null,
       duration_hours: Number(durationHours),
-      billing_mode: billingMode,
+      billing_mode: planMode,
+      reservation_type: reservationType,
       start_time: startTime,
       end_time: endTime,
       start_at: startAtRaw || null,
