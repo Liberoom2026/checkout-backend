@@ -44,19 +44,29 @@ module.exports = async function handler(req, res) {
         return res.status(400).json({ error: "Missing booking_id in metadata" });
       }
 
-      const { error } = await supabase
+      const { error: bookingError } = await supabase
         .from("bookings")
         .update({
           status: "paid",
-          stripe_session_id: session.id,
+          stripe_checkout_session_id: session.id,
           stripe_payment_intent: session.payment_intent || null,
           stripe_payment_status: session.payment_status || null,
         })
         .eq("id", bookingId);
 
-      if (error) {
-        console.error("Supabase update error:", error);
-        return res.status(500).json({ error: error.message });
+      if (bookingError) {
+        console.error("Supabase booking update error:", bookingError);
+        return res.status(500).json({ error: bookingError.message });
+      }
+
+      const { error: blockError } = await supabase
+        .from("booking_blocks")
+        .update({ status: "paid" })
+        .eq("booking_id", bookingId);
+
+      if (blockError) {
+        console.error("Supabase block update error:", blockError);
+        return res.status(500).json({ error: blockError.message });
       }
     }
 
