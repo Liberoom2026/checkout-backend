@@ -217,6 +217,65 @@ async function insertBlocksOrFail({ bookingId, propertyId, occurrences }) {
   }
 }
 
+async function getPropertyPrice(propertyId) {
+  const { data, error } = await supabase
+    .from("properties")
+    .select(
+      "price_per_hour, price_morning, price_afternoon, price_evening, price_day, price_exclusive"
+    )
+    .eq("id", propertyId)
+    .single();
+
+  if (error) {
+    throw new Error(`Unable to load property prices: ${error.message}`);
+  }
+
+  return data;
+}
+
+function getAmountForReservation({ property, billingMode, period, durationHours }) {
+  if (billingMode === "time") {
+    if (property.price_per_hour == null) return null;
+    return Math.round(Number(property.price_per_hour) * durationHours * 100);
+  }
+
+  if (billingMode === "period") {
+    if (period === "morning" && property.price_morning != null) {
+      return Math.round(Number(property.price_morning) * 100);
+    }
+
+    if (period === "afternoon" && property.price_afternoon != null) {
+      return Math.round(Number(property.price_afternoon) * 100);
+    }
+
+    if (period === "evening" && property.price_evening != null) {
+      return Math.round(Number(property.price_evening) * 100);
+    }
+
+    if (period === "day" && property.price_day != null) {
+      return Math.round(Number(property.price_day) * 100);
+    }
+
+    return null;
+  }
+
+  if (billingMode === "day") {
+    if (property.price_day != null) {
+      return Math.round(Number(property.price_day) * 100);
+    }
+    return null;
+  }
+
+  if (billingMode === "exclusive") {
+    if (property.price_exclusive != null) {
+      return Math.round(Number(property.price_exclusive) * 100);
+    }
+    return null;
+  }
+
+  return null;
+}
+
 module.exports = async function handler(req, res) {
   setCors(req, res);
 
@@ -239,18 +298,12 @@ module.exports = async function handler(req, res) {
     const guestEmail = pick(body.guest_email, body.guestEmail, body.email);
     const date = pick(body.date, body.booking_date, body.bookingDate);
 
-    const billingMode = pick(body.billing_mode, body.billingMode) || "one_time";
+    const billingMode = pick(body.billing_mode, body.billingMode) || "time";
     const startTime = pick(body.start_time, body.startTime) || null;
     const endTime = pick(body.end_time, body.endTime) || null;
     const period = pick(body.period) || null;
 
     const currency = (pick(body.currency) || "brl").toLowerCase();
-
-    const pricePerHour = toNumber(
-      pick(body.price_per_hour, body.pricePerHour)
-    );
-
-    const totalAmount = toNumber(pick(body.total_amount, body.totalAmount));
 
     let durationHours = toNumber(
       pick(body.duration_hours, body.durationHours)
@@ -261,38 +314,8 @@ module.exports = async function handler(req, res) {
         durationHours = calcDuration(startTime, endTime);
       } else if (period) {
         durationHours = periodHours(period);
-      } else if (billingMode === "exclusive" || period === "day") {
+      } else if (billingMode === "day" || billingMode === "exclusive") {
         durationHours = 24;
-      }
-    }
-
-    let amount = toNumber(
-      pick(
-        body.amount,
-        body.price_cents,
-        body.priceCents,
-        body.unit_amount,
-        body.unitAmount
-      )
-    );
-
-    if (amount === null && totalAmount !== null) {
-      amount = Math.round(totalAmount * 100);
-    }
-
-    if (amount === null && pricePerHour !== null && durationHours !== null) {
-      amount = Math.round(pricePerHour * durationHours * 100);
-    }
-
-    if (amount === null && propertyId !== null && durationHours !== null) {
-      const { data: property, error: propertyError } = await supabase
-        .from("properties")
-        .select("price_per_hour")
-        .eq("id", propertyId)
-        .single();
-
-      if (!propertyError && property?.price_per_hour != null) {
-        amount = Math.round(Number(property.price_per_hour) * durationHours * 100);
       }
     }
 
@@ -308,7 +331,6 @@ module.exports = async function handler(req, res) {
     if (!guestEmail) missing.push("guest_email");
     if (!date) missing.push("date");
     if (durationHours === null) missing.push("duration_hours");
-    if (amount === null) missing.push("amount");
     if (!successUrl) missing.push("success_url");
     if (!cancelUrl) missing.push("cancel_url");
 
@@ -331,6 +353,22 @@ module.exports = async function handler(req, res) {
     }
 
     const occurrences = buildOccurrences(baseRange, body);
+    const property = await getPropertyPrice(propertyId);
+
+    let amount = getAmountForReservation({
+      property,
+      billingMode,
+      period,
+      durationHours,
+    });
+
+    if (amount === null) {
+      return res.status(400).json({
+        error: "Property has no price configured for this reservation type",
+        received_keys: Object.keys(body),
+        received_body: body,
+      });
+    }
 
     const bookingInsert = {
       property_id: Number(propertyId),
