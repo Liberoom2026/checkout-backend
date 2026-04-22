@@ -29,9 +29,7 @@ function setCors(req, res) {
 
 function pick(...values) {
   for (const value of values) {
-    if (value !== undefined && value !== null && value !== "") {
-      return value;
-    }
+    if (value !== undefined && value !== null && value !== "") return value;
   }
   return undefined;
 }
@@ -39,6 +37,171 @@ function pick(...values) {
 function toNumber(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
+}
+
+function addDays(date, days) {
+  return new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
+}
+
+function addWeeks(date, weeks) {
+  return addDays(date, weeks * 7);
+}
+
+function brDateTime(dateStr, timeStr) {
+  return new Date(`${dateStr}T${timeStr}:00-03:00`);
+}
+
+function brStartOfDay(dateStr) {
+  return new Date(`${dateStr}T00:00:00-03:00`);
+}
+
+function brEndOfDay(dateStr) {
+  return new Date(`${dateStr}T23:59:59-03:00`);
+}
+
+function periodToRange(dateStr, period) {
+  if (period === "morning") {
+    return {
+      startAt: brDateTime(dateStr, "08:00"),
+      endAt: brDateTime(dateStr, "12:00"),
+    };
+  }
+
+  if (period === "afternoon") {
+    return {
+      startAt: brDateTime(dateStr, "13:00"),
+      endAt: brDateTime(dateStr, "18:00"),
+    };
+  }
+
+  if (period === "evening") {
+    return {
+      startAt: brDateTime(dateStr, "18:00"),
+      endAt: brDateTime(dateStr, "22:00"),
+    };
+  }
+
+  if (period === "day") {
+    return {
+      startAt: brStartOfDay(dateStr),
+      endAt: brEndOfDay(dateStr),
+    };
+  }
+
+  return null;
+}
+
+function buildBaseRange(body) {
+  const reservationType = pick(
+    body.reservation_type,
+    body.reservationType,
+    body.booking_type,
+    body.bookingType,
+    body.mode
+  );
+
+  const bookingMode = pick(body.billing_mode, body.billingMode) || "one_time";
+  const date = pick(body.date, body.booking_date, body.bookingDate);
+  const startTime = pick(body.start_time, body.startTime);
+  const endTime = pick(body.end_time, body.endTime);
+  const period = pick(body.period);
+
+  if (!date) return null;
+
+  // Diária ou exclusiva: bloqueia o dia todo
+  if (
+    reservationType === "exclusive" ||
+    bookingMode === "exclusive" ||
+    period === "day"
+  ) {
+    return {
+      startAt: brStartOfDay(date),
+      endAt: brEndOfDay(date),
+    };
+  }
+
+  // Período fixo
+  if (period && period !== "day") {
+    const range = periodToRange(date, period);
+    if (range) return range;
+  }
+
+  // Horário pontual
+  if (startTime && endTime) {
+    return {
+      startAt: brDateTime(date, startTime),
+      endAt: brDateTime(date, endTime),
+    };
+  }
+
+  return null;
+}
+
+function buildOccurrences(baseRange, body) {
+  const recurrenceType = pick(
+    body.recurrence_type,
+    body.recurrenceType
+  );
+  const recurrenceInterval = toNumber(
+    pick(body.recurrence_interval, body.recurrenceInterval)
+  ) || 1;
+
+  const recurrenceCountRaw = toNumber(
+    pick(body.recurrence_count, body.recurrenceCount)
+  );
+
+  const monthsCount = toNumber(
+    pick(
+      body.months_count,
+      body.monthsCount,
+      body.recurrence_months,
+      body.recurrenceMonths,
+      body.monthly_commitment_months,
+      body.monthlyCommitmentMonths
+    )
+  );
+
+  let recurrenceCount = recurrenceCountRaw;
+
+  if (!recurrenceCount && monthsCount) {
+    recurrenceCount = monthsCount * 4;
+  }
+
+  if (!recurrenceCount || recurrenceCount < 1) {
+    recurrenceCount = 1;
+  }
+
+  const occurrences = [];
+
+  for (let i = 0; i < recurrenceCount; i++) {
+    const offsetWeeks = recurrenceInterval * i;
+    occurrences.push({
+      startAt: recurrenceType === "weekly"
+        ? addWeeks(baseRange.startAt, offsetWeeks)
+        : baseRange.startAt,
+      endAt: recurrenceType === "weekly"
+        ? addWeeks(baseRange.endAt, offsetWeeks)
+        : baseRange.endAt,
+    });
+  }
+
+  return occurrences;
+}
+
+async function insertBlocksOrFail({ bookingId, propertyId, occurrences }) {
+  const rows = occurrences.map((occ) => ({
+    booking_id: bookingId,
+    property_id: propertyId,
+    start_at: occ.startAt.toISOString(),
+    end_at: occ.endAt.toISOString(),
+    status: "pending",
+  }));
+
+  const { error } = await supabase.from("booking_blocks").insert(rows);
+
+  if (error) {
+    throw new Error(error.message);
+  }
 }
 
 module.exports = async function handler(req, res) {
@@ -53,17 +216,8 @@ module.exports = async function handler(req, res) {
   }
 
   try {
-    let body = req.body;
-
-    if (typeof body === "string") {
-      try {
-        body = JSON.parse(body);
-      } catch {
-        body = {};
-      }
-    }
-
-    body = body || {};
+    const body =
+      typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
 
     const propertyId = toNumber(
       pick(body.property_id, body.propertyId, body.space_id, body.spaceId)
@@ -80,30 +234,16 @@ module.exports = async function handler(req, res) {
     const endTime = pick(body.end_time, body.endTime) || null;
     const period = pick(body.period) || null;
 
-    const recurrenceType = pick(body.recurrence_type, body.recurrenceType) || null;
-    const recurrenceInterval = toNumber(
-      pick(body.recurrence_interval, body.recurrenceInterval)
-    );
-    const recurrenceCount = toNumber(
-      pick(body.recurrence_count, body.recurrenceCount)
-    );
-
-    const weekday = pick(body.weekday) || null;
-    const monthsCount = toNumber(
-      pick(
-        body.months_count,
-        body.monthsCount,
-        body.recurrence_months,
-        body.recurrenceMonths,
-        body.monthly_commitment_months,
-        body.monthlyCommitmentMonths
-      )
-    );
-
     const currency = (pick(body.currency) || "brl").toLowerCase();
 
     const amountFromBody = toNumber(
-      pick(body.amount, body.price_cents, body.priceCents, body.unit_amount, body.unitAmount)
+      pick(
+        body.amount,
+        body.price_cents,
+        body.priceCents,
+        body.unit_amount,
+        body.unitAmount
+      )
     );
 
     const pricePerHour = toNumber(
@@ -160,6 +300,18 @@ module.exports = async function handler(req, res) {
       });
     }
 
+    const baseRange = buildBaseRange(body);
+
+    if (!baseRange) {
+      return res.status(400).json({
+        error: "Unable to determine reservation time range",
+        received_keys: Object.keys(body),
+        received_body: body,
+      });
+    }
+
+    const occurrences = buildOccurrences(baseRange, body);
+
     const bookingInsert = {
       property_id: Number(propertyId),
       guest_name: String(guestName),
@@ -170,12 +322,6 @@ module.exports = async function handler(req, res) {
       start_time: startTime,
       end_time: endTime,
       period,
-      recurrence_type: recurrenceType,
-      recurrence_interval: recurrenceInterval,
-      recurrence_count: recurrenceCount,
-      weekday,
-      months_count: monthsCount,
-      recurrence_months: monthsCount,
       total_amount: amount / 100,
       price_cents: amount,
       currency,
@@ -193,6 +339,23 @@ module.exports = async function handler(req, res) {
     if (bookingError) {
       return res.status(500).json({ error: bookingError.message });
     }
+
+    try {
+      await insertBlocksOrFail({
+        bookingId: booking.id,
+        propertyId: Number(propertyId),
+        occurrences,
+      });
+    } catch (blockError) {
+      await supabase.from("bookings").delete().eq("id", booking.id);
+      return res.status(400).json({
+        error: blockError.message || "Este horário já está reservado",
+      });
+    }
+
+    const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
+      apiVersion: "2023-08-16",
+    });
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
