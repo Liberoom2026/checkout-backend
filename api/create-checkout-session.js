@@ -110,19 +110,22 @@ function periodToRange(dateStr, period) {
 }
 
 function buildBaseRange(body) {
+  const date = pick(body.date, body.booking_date, body.bookingDate);
+
+  const startTime = pick(body.start_time, body.startTime);
+  const endTime = pick(body.end_time, body.endTime);
+  const period = pick(body.period);
+
   const reservationType = pick(
     body.reservation_type,
     body.reservationType,
     body.booking_type,
     body.bookingType,
-    body.mode
+    body.mode,
+    body.bookingMode
   );
 
   const billingMode = pick(body.billing_mode, body.billingMode) || "one_time";
-  const date = pick(body.date, body.booking_date, body.bookingDate);
-  const startTime = pick(body.start_time, body.startTime);
-  const endTime = pick(body.end_time, body.endTime);
-  const period = pick(body.period);
 
   if (!date) return null;
 
@@ -233,7 +236,12 @@ async function getPropertyPrice(propertyId) {
   return data;
 }
 
-function getAmountForReservation({ property, billingMode, period, durationHours }) {
+function getAmountForReservation({
+  property,
+  billingMode,
+  period,
+  durationHours,
+}) {
   if (billingMode === "time") {
     if (property.price_per_hour == null) return null;
     return Math.round(Number(property.price_per_hour) * durationHours * 100);
