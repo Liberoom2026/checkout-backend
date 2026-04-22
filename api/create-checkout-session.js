@@ -39,6 +39,17 @@ function toNumber(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+function parseDate(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function toIsoOrNull(value) {
+  const d = parseDate(value);
+  return d ? d.toISOString() : null;
+}
+
 function parseTime(time) {
   const [h, m] = String(time).split(":").map(Number);
   return h * 60 + m;
@@ -112,10 +123,6 @@ function periodToRange(dateStr, period) {
 function buildBaseRange(body) {
   const date = pick(body.date, body.booking_date, body.bookingDate);
 
-  const startTime = pick(body.start_time, body.startTime);
-  const endTime = pick(body.end_time, body.endTime);
-  const period = pick(body.period);
-
   const reservationType = pick(
     body.reservation_type,
     body.reservationType,
@@ -127,25 +134,48 @@ function buildBaseRange(body) {
 
   const billingMode = pick(body.billing_mode, body.billingMode) || "one_time";
 
-  if (!date) return null;
+  const startTime = pick(body.start_time, body.startTime);
+  const endTime = pick(body.end_time, body.endTime);
 
+  const startAtRaw = pick(body.start_at, body.startAt);
+  const endAtRaw = pick(body.end_at, body.endAt);
+
+  const period = pick(body.period);
+
+  if (!date && !startAtRaw && !endAtRaw) return null;
+
+  // Se o frontend já mandar ISO completo, usa isso direto
+  if (startAtRaw && endAtRaw) {
+    const startAt = parseDate(startAtRaw);
+    const endAt = parseDate(endAtRaw);
+
+    if (startAt && endAt) {
+      return { startAt, endAt };
+    }
+  }
+
+  // exclusiva ou diária
   if (
     reservationType === "exclusive" ||
     billingMode === "exclusive" ||
     period === "day"
   ) {
+    if (!date) return null;
     return {
       startAt: brStartOfDay(date),
       endAt: brEndOfDay(date),
     };
   }
 
+  // período
   if (period && period !== "day") {
+    if (!date) return null;
     const range = periodToRange(date, period);
     if (range) return range;
   }
 
-  if (startTime && endTime) {
+  // horário
+  if (date && startTime && endTime) {
     return {
       startAt: brDateTime(date, startTime),
       endAt: brDateTime(date, endTime),
@@ -304,13 +334,17 @@ module.exports = async function handler(req, res) {
     );
     const guestName = pick(body.guest_name, body.guestName, body.name);
     const guestEmail = pick(body.guest_email, body.guestEmail, body.email);
-    const date = pick(body.date, body.booking_date, body.bookingDate);
 
+    const date = pick(body.date, body.booking_date, body.bookingDate);
     const billingMode = pick(body.billing_mode, body.billingMode) || "time";
+
     const startTime = pick(body.start_time, body.startTime) || null;
     const endTime = pick(body.end_time, body.endTime) || null;
-    const period = pick(body.period) || null;
 
+    const startAtRaw = pick(body.start_at, body.startAt) || null;
+    const endAtRaw = pick(body.end_at, body.endAt) || null;
+
+    const period = pick(body.period) || null;
     const currency = (pick(body.currency) || "brl").toLowerCase();
 
     let durationHours = toNumber(
@@ -320,6 +354,15 @@ module.exports = async function handler(req, res) {
     if (durationHours === null) {
       if (startTime && endTime) {
         durationHours = calcDuration(startTime, endTime);
+      } else if (startAtRaw && endAtRaw) {
+        const startAt = parseDate(startAtRaw);
+        const endAt = parseDate(endAtRaw);
+        if (startAt && endAt) {
+          durationHours = Math.max(
+            1,
+            Math.ceil((endAt.getTime() - startAt.getTime()) / (60 * 60 * 1000))
+          );
+        }
       } else if (period) {
         durationHours = periodHours(period);
       } else if (billingMode === "day" || billingMode === "exclusive") {
@@ -337,7 +380,7 @@ module.exports = async function handler(req, res) {
     if (!propertyId) missing.push("property_id");
     if (!guestName) missing.push("guest_name");
     if (!guestEmail) missing.push("guest_email");
-    if (!date) missing.push("date");
+    if (!date && !(startAtRaw && endAtRaw)) missing.push("date");
     if (durationHours === null) missing.push("duration_hours");
     if (!successUrl) missing.push("success_url");
     if (!cancelUrl) missing.push("cancel_url");
@@ -382,11 +425,13 @@ module.exports = async function handler(req, res) {
       property_id: Number(propertyId),
       guest_name: String(guestName),
       guest_email: String(guestEmail),
-      date: String(date),
+      date: date ? String(date) : null,
       duration_hours: Number(durationHours),
       billing_mode: billingMode,
       start_time: startTime,
       end_time: endTime,
+      start_at: startAtRaw || null,
+      end_at: endAtRaw || null,
       period,
       total_amount: amount / 100,
       price_cents: amount,
