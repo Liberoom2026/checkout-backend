@@ -39,6 +39,24 @@ function toNumber(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+function parseTime(time) {
+  const [h, m] = String(time).split(":").map(Number);
+  return h * 60 + m;
+}
+
+function calcDuration(start, end) {
+  const diff = parseTime(end) - parseTime(start);
+  return Math.max(1, Math.ceil(diff / 60));
+}
+
+function periodHours(period) {
+  if (period === "morning") return 4;
+  if (period === "afternoon") return 6;
+  if (period === "evening") return 4;
+  if (period === "day") return 24;
+  return null;
+}
+
 function addDays(date, days) {
   return new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
 }
@@ -100,7 +118,7 @@ function buildBaseRange(body) {
     body.mode
   );
 
-  const bookingMode = pick(body.billing_mode, body.billingMode) || "one_time";
+  const billingMode = pick(body.billing_mode, body.billingMode) || "one_time";
   const date = pick(body.date, body.booking_date, body.bookingDate);
   const startTime = pick(body.start_time, body.startTime);
   const endTime = pick(body.end_time, body.endTime);
@@ -108,10 +126,9 @@ function buildBaseRange(body) {
 
   if (!date) return null;
 
-  // Diária ou exclusiva: bloqueia o dia todo
   if (
     reservationType === "exclusive" ||
-    bookingMode === "exclusive" ||
+    billingMode === "exclusive" ||
     period === "day"
   ) {
     return {
@@ -120,13 +137,11 @@ function buildBaseRange(body) {
     };
   }
 
-  // Período fixo
   if (period && period !== "day") {
     const range = periodToRange(date, period);
     if (range) return range;
   }
 
-  // Horário pontual
   if (startTime && endTime) {
     return {
       startAt: brDateTime(date, startTime),
@@ -138,13 +153,9 @@ function buildBaseRange(body) {
 }
 
 function buildOccurrences(baseRange, body) {
-  const recurrenceType = pick(
-    body.recurrence_type,
-    body.recurrenceType
-  );
-  const recurrenceInterval = toNumber(
-    pick(body.recurrence_interval, body.recurrenceInterval)
-  ) || 1;
+  const recurrenceType = pick(body.recurrence_type, body.recurrenceType);
+  const recurrenceInterval =
+    toNumber(pick(body.recurrence_interval, body.recurrenceInterval)) || 1;
 
   const recurrenceCountRaw = toNumber(
     pick(body.recurrence_count, body.recurrenceCount)
@@ -176,12 +187,14 @@ function buildOccurrences(baseRange, body) {
   for (let i = 0; i < recurrenceCount; i++) {
     const offsetWeeks = recurrenceInterval * i;
     occurrences.push({
-      startAt: recurrenceType === "weekly"
-        ? addWeeks(baseRange.startAt, offsetWeeks)
-        : baseRange.startAt,
-      endAt: recurrenceType === "weekly"
-        ? addWeeks(baseRange.endAt, offsetWeeks)
-        : baseRange.endAt,
+      startAt:
+        recurrenceType === "weekly"
+          ? addWeeks(baseRange.startAt, offsetWeeks)
+          : baseRange.startAt,
+      endAt:
+        recurrenceType === "weekly"
+          ? addWeeks(baseRange.endAt, offsetWeeks)
+          : baseRange.endAt,
     });
   }
 
@@ -225,9 +238,6 @@ module.exports = async function handler(req, res) {
     const guestName = pick(body.guest_name, body.guestName, body.name);
     const guestEmail = pick(body.guest_email, body.guestEmail, body.email);
     const date = pick(body.date, body.booking_date, body.bookingDate);
-    const durationHours = toNumber(
-      pick(body.duration_hours, body.durationHours)
-    );
 
     const billingMode = pick(body.billing_mode, body.billingMode) || "one_time";
     const startTime = pick(body.start_time, body.startTime) || null;
@@ -236,7 +246,27 @@ module.exports = async function handler(req, res) {
 
     const currency = (pick(body.currency) || "brl").toLowerCase();
 
-    const amountFromBody = toNumber(
+    const pricePerHour = toNumber(
+      pick(body.price_per_hour, body.pricePerHour)
+    );
+
+    const totalAmount = toNumber(pick(body.total_amount, body.totalAmount));
+
+    let durationHours = toNumber(
+      pick(body.duration_hours, body.durationHours)
+    );
+
+    if (durationHours === null) {
+      if (startTime && endTime) {
+        durationHours = calcDuration(startTime, endTime);
+      } else if (period) {
+        durationHours = periodHours(period);
+      } else if (billingMode === "exclusive" || period === "day") {
+        durationHours = 24;
+      }
+    }
+
+    let amount = toNumber(
       pick(
         body.amount,
         body.price_cents,
@@ -245,16 +275,6 @@ module.exports = async function handler(req, res) {
         body.unitAmount
       )
     );
-
-    const pricePerHour = toNumber(
-      pick(body.price_per_hour, body.pricePerHour)
-    );
-
-    const totalAmount = toNumber(
-      pick(body.total_amount, body.totalAmount)
-    );
-
-    let amount = amountFromBody;
 
     if (amount === null && totalAmount !== null) {
       amount = Math.round(totalAmount * 100);
@@ -353,10 +373,6 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
-      apiVersion: "2023-08-16",
-    });
-
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       payment_method_types: ["card"],
@@ -401,6 +417,7 @@ module.exports = async function handler(req, res) {
       id: session.id,
       booking_id: booking.id,
       received_keys: Object.keys(body),
+      received_body: body,
     });
   } catch (err) {
     console.error("create-checkout-session error:", err);
